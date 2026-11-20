@@ -1,0 +1,33 @@
+name: Build Windows exe
+
+# 每次推代码 / 手动触发，都会在 GitHub 云端 Windows 机器上自动打包，
+# 完成后在本页底部 Artifacts 下载 PyTrace-Windows-exe.zip，解压即得 PyTrace.exe
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:        # 允许在 Actions 页面手动点按钮触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup clean Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install fastapi uvicorn pyinstaller
+
+      - name: Build exe
+        run: python -m PyInstaller --clean --noconfirm pytrace.spec
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: PyTrace-Windows-exe
+          path: dist/PyTrace.exe
+          retention-days: 90
