@@ -1,0 +1,6 @@
+# PyTrace 运行依赖（都很轻量）
+fastapi>=0.100
+uvicorn>=0.23
+
+# 可选：想要"原生窗口"而不是浏览器，额外安装 pywebview
+# pywebview>=4.4

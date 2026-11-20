@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>PyTrace · Python 运行可视化工作台</title>
+<link rel="icon" href="/web/favicon.svg" type="image/svg+xml"/>
+<link rel="stylesheet" href="/web/style.css"/>
+</head>
+<body>
+<div class="scan-beam" id="scanBeam"></div>
+<div id="app">
+
+  <!-- ================= 顶栏 ================= -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">
+        <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true">
+          <path d="M4 22 L10 12 L16 20 L22 7 L28 22" fill="none" stroke="currentColor" stroke-width="2.4"
+                stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="10" cy="12" r="2.6" fill="currentColor"/>
+          <circle cx="22" cy="7" r="2.6" fill="currentColor"/>
+        </svg>
+      </span>
+      <div class="brand-text">
+        <b>PyTrace <span class="demo-badge" id="demoBadge" hidden>在线演示</span></b>
+        <small>Python 运行可视化工作台</small>
+      </div>
+    </div>
+
+    <div class="filebar">
+      <button class="btn ghost" id="btnOpen" title="打开本地 .py 文件（也可以直接拖进来）">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        打开文件
+      </button>
+      <button class="btn ghost" id="btnOpenDir" title="打开整个项目文件夹（支持本地模块 import）">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        打开文件夹
+      </button>
+      <div class="recent-wrap" id="recentWrap">
+        <button class="btn ghost" id="btnRecent" title="最近打开的项目 / 文件，点一下直接恢复">
+          <svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 3a9 9 0 109 9M12 7v5l3.5 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          最近
+        </button>
+        <div class="recent-panel" id="recentPanel" hidden>
+          <div class="rp-head">
+            <span>最近打开</span>
+            <button id="rpClear" class="rp-clear" title="清空最近记录">清空</button>
+          </div>
+          <div class="rp-list" id="rpList"></div>
+          <div class="rp-empty" id="rpEmpty">还没有记录 —— 打开文件夹 / 文件后会自动出现在这里</div>
+        </div>
+      </div>
+      <span class="chip" id="fileChip">未选择文件</span>
+      <select id="entrySel" hidden title="选择作为入口运行的文件"></select>
+      <input type="file" id="fileInput" accept=".py,.txt" multiple hidden/>
+      <input type="file" id="dirInput" webkitdirectory multiple hidden/>
+    </div>
+
+    <div class="runbar">
+      <label class="mini">示例
+        <select id="sampleSel"><option value="">— 内置示例 —</option></select>
+      </label>
+      <label class="mini">超时
+        <input type="number" id="timeoutInput" value="30" min="1" max="120" step="1"/>s
+      </label>
+      <label class="mini" title="选一个能跑你这份代码的 Python（项目内虚拟环境 / IDE 配置的那个）">解释器
+        <select id="interpSel"><option value="">自动检测中…</option></select>
+      </label>
+      <label class="mini" title="填你项目在磁盘上的真实路径，PyTrace 就会在你的项目目录里原地运行（相对路径、本地包、数据文件全部正常）">项目目录
+        <input type="text" id="rootInput" placeholder="可选，如 D:\\work\\myproj" spellcheck="false"/>
+      </label>
+      <label class="mini" title="命令行参数（sys.argv）：脚本里用 argparse / sys.argv 接收参数时在这里填，多个参数用空格隔开，例如 -h 或 data.txt --verbose">参数
+        <input type="text" id="argvInput" placeholder="可选，空格分隔" spellcheck="false"/>
+      </label>
+      <button class="btn ghost" id="btnLive" title="在你自己的 IDE / 终端里跑你的代码，PyTrace 把运行过程实时投到这里（环境 100% 是你自己的）">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 10a12 12 0 0116 0M7 13.5a8 8 0 0110 0M10 17a4 4 0 014 0M12 20.5h.01" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        接入我的 IDE
+      </button>
+      <button class="btn ghost" id="btnEnvCheck" title="用选中的解释器逐个验证代码里的 import，确认这份代码在你这里真的能跑">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 12l5 5L20 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        验证环境
+      </button>
+      <button class="btn ghost" id="btnSelfTest" title="一键自检：逐步验证「解释器 → 探针 → 最小脚本采集」整条链路，每步给出命令与原始输出">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M12 8a4 4 0 100 8 4 4 0 000-8z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        自检
+      </button>
+      <button class="btn ghost" id="btnDebug" title="断点调试：先在左边行号上点一下打红点，再点运行——程序会真的停在断点处等你（F8 继续 / F9 单步）">
+        <svg viewBox="0 0 24 24" width="15" height="15"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/></svg>
+        调试
+      </button>
+      <button class="btn primary" id="btnRun">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M8 5l11 7-11 7z" fill="currentColor"/></svg>
+        运行
+      </button>
+      <button class="btn danger" id="btnStop" hidden>
+        <svg viewBox="0 0 24 24" width="13" height="13"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/></svg>
+        停止
+      </button>
+      <span class="chip py" id="pyChip" hidden></span>
+      <span class="chip" id="verChip" title="当前 PyTrace 版本号：遇到问题时先确认两边版本一致" hidden></span>
+    </div>
+  </header>
+
+  <!-- 调试工具条：只在"程序停在断点"时出现。人在看代码，代码在等他。 -->
+  <div class="dbg-bar" id="dbgBar" hidden>
+    <span class="dbg-dot"></span>
+    <span class="dbg-msg" id="dbgMsg">已暂停</span>
+    <div class="dbg-btns">
+      <button class="dbg-btn go" id="dbgGo" title="继续运行到下一个断点（F8）">继续</button>
+      <button class="dbg-btn" id="dbgOver" title="单步跳过：执行这一行，不进入它调用的函数（F9）">单步跳过</button>
+      <button class="dbg-btn" id="dbgInto" title="单步进入：钻进这一行调用的函数里（Shift+F9）">单步进入</button>
+      <button class="dbg-btn" id="dbgOut" title="单步跳出：把当前函数跑完，回到调用它的地方（Alt+F9）">单步跳出</button>
+      <button class="dbg-btn stop" id="dbgStop" title="停止本次运行（已采集的过程会保留）">停止</button>
+    </div>
+    <span class="dbg-hint">暂停期间不计超时</span>
+  </div>
+
+  <!-- 变量时间旅行：点变量卡片上的 ⟲ 弹出，回答「这个值什么时候被谁改的」 -->
+  <div class="vtt-panel" id="vttPanel" hidden>
+    <div class="vtt-head">
+      <span class="vtt-ico">🕘</span>
+      <b id="vttName"></b>
+      <span class="vtt-sub">的变化轨迹 · 点任意一条回到那一刻</span>
+      <button id="vttClose" title="关闭（Esc）">×</button>
+    </div>
+    <div class="vtt-list" id="vttList"></div>
+    <div class="vtt-empty" id="vttEmpty">这个变量在本次运行里没有记录到变化</div>
+  </div>
+
+  <!-- 内存引用图：点变量卡片上的 🔗 弹出，Python Tutor 式指针图（谁指向谁、谁和谁共享） -->
+  <div class="ref-panel" id="refsPanel" hidden>
+    <div class="ref-head">
+      <span class="ref-ico">🔗</span>
+      <b id="refsName"></b>
+      <span class="ref-sub">内存引用图 · 虚线边 = 指向同一个对象（共享引用）</span>
+      <button id="refsClose" title="关闭（Esc）">×</button>
+    </div>
+    <div class="ref-body" id="refsBody"></div>
+    <div class="ref-legend">
+      <span><i class="lg-line"></i>引用</span>
+      <span><i class="lg-dash"></i>指向已有对象（共享 / 回边）</span>
+      <span><i class="lg-alias"></i>与其他变量共享</span>
+    </div>
+    <div class="ref-empty" id="refsEmpty" hidden></div>
+  </div>
+
+  <!-- ================= 主体：左源码 / 中舞台 / 右详情 / 底部面板 ================= -->
+  <main class="layout">
+
+    <!-- 左：源码 -->
+    <section class="pane pane-code">
+      <div class="pane-head">
+        <span class="ph-title">源码</span>
+        <span class="ph-meta" id="codeMeta">—</span>
+        <div class="ph-right">
+          <button class="btn tiny ghost" id="btnCloseFile" title="关闭当前打开的文件/项目" hidden>
+            <svg viewBox="0 0 24 24" width="12" height="12"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            关闭
+          </button>
+        </div>
+      </div>
+      <div class="code-wrap">
+        <!-- 文件树：显示已打开的单文件 / 文件夹项目内容 -->
+        <aside class="filetree" id="fileTree" hidden>
+          <div class="ft-head">
+            <span>文件</span>
+            <span class="ft-cnt" id="ftCount"></span>
+          </div>
+          <div class="ft-body" id="ftBody"></div>
+        </aside>
+        <div class="editor" id="editor">
+          <div class="ft-handle" id="ftHandle" title="展开文件树">›</div>
+          <svg class="flow-layer" id="flowLayer" aria-hidden="true"></svg>
+          <div class="exec-cursor" id="execCursor"></div>
+          <div class="lines" id="lines"></div>
+        </div>
+      </div>
+      <div class="dropzone" id="dropzone">
+        <div class="dz-inner">
+          <svg viewBox="0 0 24 24" width="34" height="34"><path d="M12 16V4m0 0L7 9m5-5l5 5M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <p>拖入 <b>.py</b> 文件或整个 <b>文件夹</b>，或点「打开文件 / 打开文件夹」</p>
+          <small>代码只在本机执行，不会上传；文件夹项目支持本地模块 import</small>
+        </div>
+      </div>
+    </section>
+
+    <!-- 可拖拽分隔条：拖动调节左栏宽度，双击复位 -->
+    <div class="vdrag" id="dragL" title="拖动调节源码栏宽度 · 双击复位"></div>
+
+    <!-- 中：执行舞台 -->
+    <section class="pane pane-stage">
+      <div class="pane-head">
+        <span class="ph-title">执行舞台</span>
+        <span class="ph-meta" id="stageMeta">等待运行</span>
+        <div class="ph-right">
+          <div class="seg" id="stageSeg" title="「舞台」看逐行执行；「全景图」看整个项目谁调用谁、跑过哪些文件；「讲解」不运行也能逐段读懂代码">
+            <button class="seg-b active" data-view="stage">舞台</button>
+            <button class="seg-b" data-view="graph">全景图</button>
+            <button class="seg-b" data-view="doc">讲解</button>
+          </div>
+          <label class="switch" id="stageSpeedWrap" title="手动调节动画播放速度">
+            <span class="spd-lab">速度</span>
+            <select id="stageSpeed">
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2×</option>
+              <option value="3">3×</option>
+            </select>
+          </label>
+          <label class="switch" id="stageAnimToggle" title="关闭后只显示结果，不播放逐帧动画">
+            <input type="checkbox" id="stageAnim" checked/><span>逐帧动画</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="stage" id="stage">
+        <div class="stage-bg"></div>
+
+        <!-- 当前执行行 -->
+        <div class="stage-head" id="stageHead">
+          <span class="sh-no" id="shNo">—</span>
+          <code class="sh-code" id="shCode">运行代码，这里会逐行演示变量的产生与计算过程</code>
+          <span class="sh-badge" id="shBadge"></span>
+        </div>
+
+        <!-- 作用域面包屑 + 传参提示 -->
+        <div class="stage-scope" id="stageScope"></div>
+
+        <!-- 新手说明卡片：这一步在干什么 -->
+        <div class="stage-explain" id="stageExplain" hidden>
+          <span class="se-icon">💡</span>
+          <div class="se-body" id="stageExplainBody"></div>
+        </div>
+
+        <!-- 演出画布：输入 / 过程 / 输出 三块 -->
+        <div class="stage-canvas">
+          <div class="blk blk-in">
+            <span class="blk-t">输入<i>传进来的参数</i></span>
+            <div class="blk-b in-box" id="stageIn"><span class="in-ph">—</span></div>
+          </div>
+          <div class="blk blk-proc">
+            <span class="blk-t">过程<i>变量与计算</i></span>
+            <div class="blk-b proc-box">
+              <div class="vars" id="stageVars"></div>
+              <div class="expr" id="stageExpr"></div>
+            </div>
+          </div>
+          <div class="blk blk-out">
+            <span class="blk-t">输出<i>print 的结果</i></span>
+            <div class="blk-b out-box" id="stageOut">
+              <span class="ob-ph" id="stageOutPh">程序 print 的内容会出现在这里</span>
+              <div class="ob-lines" id="stageOutLines"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 飞行气泡层 -->
+        <div class="stage-fx" id="stageFx"></div>
+
+        <div class="stage-empty" id="stageEmpty">
+          <p>变量的诞生与流动，会在这里逐帧演示</p>
+          <small>点右上角「运行」，看 <b>a = 3</b> 如何出现、<b>c = a + b</b> 如何把 3 和 4 算成 7</small>
+        </div>
+
+        <!-- ============ 项目全景图：谁调用谁 + 运行覆盖 ============ -->
+        <div class="graph-view" id="graphView" hidden>
+          <div class="gv-bar">
+            <div class="gv-head">
+              <b>项目全景图</b>
+              <small id="gvSub">—</small>
+            </div>
+            <div class="gv-legend">
+              <span class="lg"><i class="dot start"></i>启动入口</span>
+              <span class="lg"><i class="dot mod"></i>模块</span>
+              <span class="lg"><i class="dot orph"></i>独立脚本</span>
+              <span class="lg"><i class="ln imp"></i>import</span>
+              <span class="lg"><i class="ln call"></i>调用</span>
+              <span class="lg"><i class="ln spawn" title="代码里以字符串路径启动它（subprocess / os.system）"></i>子进程启动</span>
+            </div>
+            <div class="gv-acts">
+              <label class="mini" title="一次最多跑多少个入口（每个入口都是一次真实执行，大项目会慢）">上限
+                <select id="gvLimit">
+                  <option value="5">5 个</option>
+                  <option value="10" selected>10 个</option>
+                  <option value="20">20 个</option>
+                  <option value="999">全部</option>
+                </select>
+              </label>
+              <button class="btn tiny ghost" id="gvFit" title="缩放复位到适应窗口">适应</button>
+              <button class="btn tiny ghost" id="gvExport"
+                      title="把整个项目导出成一份自包含 HTML：全景图 + 依赖表 + 当前文件的逐段讲解">
+                <svg viewBox="0 0 24 24" width="11" height="11"><path d="M12 3v11m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                导出报告
+              </button>
+              <button class="btn tiny primary" id="gvRunAll" title="依次真实执行每个启动入口，把跑过的文件点亮">
+                <svg viewBox="0 0 24 24" width="11" height="11"><path d="M8 5l11 7-11 7z" fill="currentColor"/></svg>
+                跑全部入口
+              </button>
+              <button class="btn tiny danger" id="gvStop" hidden>停止</button>
+            </div>
+          </div>
+
+          <div class="gv-prog" id="gvProg" hidden>
+            <div class="gv-pbar"><i id="gvPbar"></i></div>
+            <span id="gvProgTxt"></span>
+          </div>
+
+          <div class="gv-canvas" id="gvCanvas">
+            <svg id="gvSvg" xmlns="http://www.w3.org/2000/svg"></svg>
+            <div class="gv-empty" id="gvEmpty" hidden></div>
+            <aside class="gv-detail" id="gvDetail" hidden></aside>
+          </div>
+
+          <div class="gv-foot" id="gvFoot">
+            单击节点看详情 · 双击打开文件 · 空白处拖动平移 · 滚轮缩放
+          </div>
+        </div>
+
+        <!-- ============ 阅读模式：不运行，逐段讲解 ============ -->
+        <div class="doc-view" id="docView" hidden>
+          <div class="dv-bar">
+            <div class="dv-head">
+              <b>逐段讲解</b>
+              <small id="dvSub">不运行代码，直接读懂它在干什么</small>
+            </div>
+            <div class="dv-acts">
+              <select id="dvFile" hidden title="切换要讲解的文件"></select>
+              <button class="btn tiny ghost" id="dvToggleAll" title="展开/收起所有代码块">展开代码</button>
+              <button class="btn tiny ghost" id="dvCopy" title="把整篇讲解复制成纯文本">复制全文</button>
+              <button class="btn tiny ghost" id="dvRefresh" title="重新分析当前文件">重新分析</button>
+              <button class="btn tiny primary" id="dvExport"
+                      title="导出为一份自包含 HTML：讲解 + 代码旁注 + 项目全景图，可离线打开、打印成 PDF">
+                <svg viewBox="0 0 24 24" width="11" height="11"><path d="M12 3v11m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                导出报告
+              </button>
+            </div>
+          </div>
+          <div class="dv-body">
+            <aside class="dv-outline" id="dvOutline"></aside>
+            <main class="dv-main" id="dvMain"></main>
+          </div>
+          <div class="dv-foot" id="dvFoot">
+            点左侧目录跳段 · 点行号在左边源码里定位 · 行右侧的灰色文字是这一行在干什么
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 可拖拽分隔条：拖动调节右栏宽度，双击复位 -->
+    <div class="vdrag" id="dragR" title="拖动调节检查器宽度 · 双击复位"></div>
+
+    <!-- 右：检查器 -->
+    <aside class="pane pane-inspect">
+      <div class="pane-head">
+        <span class="ph-title" id="inspectTitle">运行概览</span>
+        <button class="btn tiny ghost" id="btnClearSel" title="返回概览" hidden>×</button>
+      </div>
+      <div class="inspect-body" id="inspectBody">
+        <div class="kpi-grid" id="kpiGrid">
+          <div class="kpi"><b id="kpiCalls">0</b><span>用户调用</span></div>
+          <div class="kpi"><b id="kpiDur">0</b><span>总耗时 ms</span></div>
+          <div class="kpi"><b id="kpiDepth">0</b><span>最大深度</span></div>
+          <div class="kpi"><b id="kpiImports">0</b><span>导入模块</span></div>
+        </div>
+        <div id="inspectDetail">
+        </div>
+      </div>
+    </aside>
+
+    <!-- 底部：全部面板 -->
+    <section class="dock" id="dock">
+      <div class="hdrag" id="dragDock" title="拖动调整底部面板高度，双击复位"></div>
+      <div class="tabs" id="tabs">
+        <button class="tab active" data-tab="tree">调用树</button>
+        <button class="tab" data-tab="conc">并发</button>
+        <button class="tab" data-tab="imports">导入</button>
+        <button class="tab" data-tab="stats">统计</button>
+        <button class="tab" data-tab="output">输出</button>
+        <button class="tab" data-tab="events">事件流</button>
+        <div class="tab-spacer"></div>
+        <label class="switch" id="libToggle" title="是否显示对标准库/三方库的调用">
+          <input type="checkbox" id="showLib"/><span>库调用</span>
+        </label>
+        <button class="btn tiny ghost dock-toggle" id="dockToggle" title="折叠 / 展开底部面板">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+
+      <div class="tab-panels">
+        <!-- 调用树 -->
+        <div class="panel active" data-panel="tree">
+          <div class="tree-head">
+            <span class="col-fn">函数 / 入参</span>
+            <span class="col-bar">时间轴</span>
+            <span class="col-dur">耗时</span>
+          </div>
+          <div class="tree-body" id="treeBody">
+            <div class="empty" id="treeEmpty">
+              <p>还没有运行记录</p>
+              <small>点击右上角「运行」，即可看到每个函数的入参、返回值与耗时</small>
+            </div>
+          </div>
+        </div>
+
+        <!-- 并发：线程 / asyncio 任务泳道时间线（单线程同步代码显示空态） -->
+        <div class="panel" data-panel="conc">
+          <div class="panel-scroll" id="concBody">
+            <div class="empty" id="concEmpty"><p>本次运行是单线程同步代码</p><small>用到 threading / asyncio 时，这里会按「线程 / 任务」分泳道展示执行时间线——谁在什么时候跑、在哪里交错</small></div>
+          </div>
+        </div>
+
+        <!-- 导入 -->
+        <div class="panel" data-panel="imports">
+          <div class="panel-scroll" id="importsBody">
+            <div class="empty"><p>暂无导入记录</p><small>运行后这里会列出 import 的模块、耗时与来源路径</small></div>
+          </div>
+        </div>
+
+        <!-- 统计 -->
+        <div class="panel" data-panel="stats">
+          <div class="panel-scroll" id="statsBody">
+            <div class="empty"><p>暂无统计数据</p><small>运行结束后生成调用耗时排行</small></div>
+          </div>
+        </div>
+
+        <!-- 输出 -->
+        <div class="panel" data-panel="output">
+          <div class="console" id="consoleBody">
+            <div class="empty"><p>暂无输出</p><small>程序里的 print() / stderr 会实时显示在这里</small></div>
+          </div>
+        </div>
+
+        <!-- 事件流 -->
+        <div class="panel" data-panel="events">
+          <div class="ev-body" id="eventsBody">
+            <div class="empty"><p>暂无事件</p><small>记录每一次函数调用、返回、异常与导入</small></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ================= 播放控制条 ================= -->
+  <footer class="playbar">
+    <button class="btn icon" id="btnPlay" title="播放 / 暂停（空格）">
+      <svg viewBox="0 0 24 24" width="16" height="16" id="playIcon"><path d="M8 5l11 7-11 7z" fill="currentColor"/></svg>
+    </button>
+    <button class="btn icon" id="btnPrev" title="上一步">
+      <svg viewBox="0 0 24 24" width="15" height="15"><path d="M18 5v14L8 12zM6 5v14" fill="currentColor"/></svg>
+    </button>
+    <button class="btn icon" id="btnNext" title="下一步">
+      <svg viewBox="0 0 24 24" width="15" height="15"><path d="M6 5v14l10-7zM18 5v14" fill="currentColor"/></svg>
+    </button>
+    <span class="live-dot" id="liveDot" title="实时跟随"></span>
+    <input type="range" id="scrub" min="0" max="1000" value="1000"/>
+    <span class="clock" id="clock">0 / 0 ms</span>
+    <label class="mini">速度
+      <select id="speedSel">
+        <option value="0.25">0.25×</option>
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+        <option value="4">4×</option>
+        <option value="8">8×</option>
+      </select>
+    </label>
+    <span class="now" id="nowLabel">就绪</span>
+  </footer>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<!-- 接入我的 IDE：在自己进程里跑，事件投到这里 -->
+<div class="live-overlay" id="liveOverlay" hidden>
+  <div class="live-panel">
+    <div class="lv-head">
+      <span class="lv-title">📡 接入我的 IDE</span>
+      <button class="btn tiny ghost" id="btnLiveClose">×</button>
+    </div>
+    <p class="lv-sub">在你的解释器、你的目录里照常运行你的代码，PyTrace 只在旁边观测 ——
+       环境 100% 是你自己的（conda / venv / IDE 配置全都一致），事件实时投到本界面。</p>
+
+    <div class="lv-way">
+      <b>方式一 · 命令行运行（推荐，信息最全）</b>
+      <div class="lv-cmd" id="cmdCli"><code>python -m pytrace main.py</code>
+        <button class="btn tiny ghost" data-copy="cmdCli">复制</button></div>
+      <small>在 PyTrace 目录下执行；或先把 PyTrace 目录加进 PYTHONPATH：
+        <code id="cmdPath">PYTHONPATH=/path/to/PyTrace python -m pytrace main.py</code></small>
+    </div>
+
+    <div class="lv-way">
+      <b>方式二 · 代码注入（在 IDE 里点运行就行）</b>
+      <div class="lv-cmd"><code>import sys; sys.path.insert(0, r"<span id="cmdHome">PyTrace 所在目录</span>")
+import pytrace; pytrace.attach()</code>
+        <button class="btn tiny ghost" data-copy="cmdCode">复制</button></div>
+      <small>加在脚本最前面，之后整个脚本的执行都会被投到这里的舞台。</small>
+    </div>
+
+    <div class="lv-status" id="liveStatus">
+      <span class="lv-dot wait"></span><span id="liveStatusText">等待你的进程接入…</span>
+    </div>
+  </div>
+</div>
+<script src="/web/app.js"></script>
+</body>
+</html>
