@@ -2162,8 +2162,14 @@ async def api_selftest(payload: dict):
                     probe_ok = bool(info.get("ok"))
                 except Exception:
                     pass
+        err_txt = r.stderr.decode(errors="replace").strip()
+        # 自检 JSON 里带的崩溃解读 / 孙进程 faulthandler 输出，一并展示
+        if info.get("crash"):
+            err_txt = (err_txt + "\n" + str(info["crash"])).strip()
+        if info.get("child_stderr"):
+            err_txt = (err_txt + "\n[子进程 stderr]\n" + str(info["child_stderr"])).strip()
         _step("探针采集管线", probe_ok, " ".join(cmd), out or json.dumps(info, ensure_ascii=False),
-              r.stderr.decode(errors="replace").strip(), r.returncode)
+              err_txt, r.returncode)
     except Exception as exc:                    # noqa: BLE001
         _step("探针采集管线", False, " ".join(cmd), "",
               "%s: %s" % (type(exc).__name__, exc), 1)
@@ -2265,7 +2271,7 @@ def _demo_match(code: str):
     return None
 
 
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
 
 
 @app.get("/api/info")
@@ -2767,8 +2773,10 @@ async def _ws_run_inner(ws: WebSocket, cfg: dict):
         await ws.close()
         return
     try:
+        # -X faulthandler：Windows 上 0xC0000005 这类硬崩溃不会留 Python traceback，
+        # 加了它，崩溃瞬间会把 Python 层调用栈写进 stderr，用户截图就能给我们定位
         proc = await asyncio.create_subprocess_exec(
-            pyexe, "-X", "utf8", str(RUNNER), str(event_path), str(code_path),
+            pyexe, "-X", "utf8", "-X", "faulthandler", str(RUNNER), str(event_path), str(code_path),
             *flags, *tail,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
@@ -2910,6 +2918,24 @@ async def _ws_run_inner(ws: WebSocket, cfg: dict):
         await _safe_send(ws, {"e": "error", "type": "ExitInfo",
                               "msg": "退出码 %s，标准错误为空；最后的标准输出：\n%s"
                                      % (proc.returncode, stats["tail"].strip()[-700:]), "line": 0})
+
+    # Windows 硬崩溃（访问违例等）：stderr 通常是空的，必须把退出码翻译成人话，
+    # 否则用户只会看到"失败/连接出错"，没有任何下一步可走
+    try:
+        _u = int(proc.returncode or 0) & 0xFFFFFFFF
+        _CRASH_MSGS = {
+            0xC0000005: ("子进程异常崩溃：0xC0000005（内存访问违例）—— 这是解释器/环境级故障，"
+                          "不是你代码的 bug。最常见原因：杀毒软件拦截（把 PyTrace.exe 加入白名单），"
+                          "或 Anaconda 环境的 C 扩展与追踪器冲突。"
+                          "建议：到 python.org 装一个官方 Python，在顶栏「解释器」下拉里选它再跑。"),
+            0xC0000409: "子进程异常崩溃：0xC0000409（栈溢出保护触发）—— 同样是环境级崩溃，非代码错误。",
+            0xC0000135: "子进程无法启动：0xC0000135（缺 DLL）—— 这个解释器安装不完整，换一个解释器。",
+        }
+        if _u in _CRASH_MSGS and not stderr_text:
+            await _safe_send(ws, {"e": "error", "type": "Crash",
+                                  "msg": _CRASH_MSGS[_u], "line": 0, "code": int(proc.returncode)})
+    except Exception:
+        pass
 
     await _safe_send(ws, {"e": "done", "code": proc.returncode, "truncated": stats["truncated"],
                           "wall": round((time.time() - t0) * 1000, 1)})

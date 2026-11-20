@@ -1501,7 +1501,7 @@ def _selftest() -> int:
                 f.write("def add(a, b):\n    return a + b\n\nprint('sum =', add(2, 3))\n")
             ev_path = os.path.join(td, "events.jsonl")
             # 直接进程内调用 main()（不是 import 后的再入，runner 每次都是新进程）
-            code = subprocess_run_self(mini, ev_path)
+            code, child_err = subprocess_run_self(mini, ev_path)
             n_events = 0
             has_call = has_stdout = False
             if os.path.isfile(ev_path):
@@ -1520,12 +1520,18 @@ def _selftest() -> int:
                         if o.get("e") == "stdout":
                             has_stdout = True
             ok = (code == 0 and n_events >= 8 and has_stdout)
-            print(json.dumps({
+            res = {
                 "ok": ok, "exit": code, "events": n_events,
                 "has_call": has_call, "has_stdout": has_stdout,
                 "ms": round((_t.time() - _t0) * 1000),
                 "python": sys.version.split()[0],
-            }, ensure_ascii=False))
+            }
+            note = _crash_note(code)
+            if note:
+                res["crash"] = note
+            if child_err:
+                res["child_stderr"] = child_err   # faulthandler 的崩溃调用栈就在这里
+            print(json.dumps(res, ensure_ascii=False))
             return 0 if ok else 1
     except Exception as exc:
         print(json.dumps({"ok": False, "error": "%s: %s" % (type(exc).__name__, exc),
@@ -1533,12 +1539,41 @@ def _selftest() -> int:
         return 1
 
 
-def subprocess_run_self(mini: str, ev_path: str) -> int:
-    """用「干净的子进程」跑一遍探针 —— 与生产路径完全一致，能暴露 import 级别的故障。"""
+def subprocess_run_self(mini: str, ev_path: str):
+    """用「干净的子进程」跑一遍探针 —— 与生产路径完全一致，能暴露 import 级别的故障。
+
+    返回 (退出码, stderr 尾部)。带 -X faulthandler：Windows 上偶发的
+    0xC0000005（访问违例）硬崩溃不会打印 Python traceback，faulthandler 能在
+    崩溃瞬间把 Python 层调用栈 dump 到 stderr —— 没有它，我们只能看到一个数字。
+    """
     import subprocess as _sp
-    r = _sp.run([sys.executable, "-X", "utf8", os.path.abspath(__file__),
-                 ev_path, mini], capture_output=True, timeout=30)
-    return r.returncode
+    r = _sp.run([sys.executable, "-X", "utf8", "-X", "faulthandler",
+                 os.path.abspath(__file__), ev_path, mini],
+                capture_output=True, timeout=30)
+    err_tail = ""
+    try:
+        err_tail = r.stderr.decode(errors="replace").strip()[-1500:]
+    except Exception:
+        pass
+    return r.returncode, err_tail
+
+
+def _crash_note(code) -> str:
+    """把 Windows 异常退出码翻译成人类语言（硬崩溃不会留下 traceback）。"""
+    try:
+        u = int(code) & 0xFFFFFFFF
+    except Exception:
+        return ""
+    if u == 0xC0000005:
+        return ("子进程异常崩溃：0xC0000005（内存访问违例），不是代码报错。"
+                "常见原因：① 杀毒软件（Windows Defender 等）拦截了临时目录里的脚本，"
+                "把 PyTrace.exe 加入白名单重试；② Anaconda 环境的 C 扩展与追踪器冲突，"
+                "到 python.org 装一个官方 Python 再在「解释器」下拉里选它。")
+    if u == 0xC0000409:
+        return "子进程异常崩溃：0xC0000409（栈缓冲区溢出保护触发），同样是环境级崩溃而非代码错误。"
+    if u == 0xC0000135:
+        return "子进程无法启动：缺少依赖的 DLL（0xC0000135），这个解释器安装不完整。"
+    return ""
 
 
 def main() -> int:
