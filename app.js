@@ -5132,7 +5132,28 @@ function covLabel(name) {
 
 /* ---- 布局：按依赖深度分列，列内按目录聚拢 ---- */
 function graphLayout() {
-  const all = ((S.projectMap && S.projectMap.files) || []).filter((f) => !f.error);
+  let all = ((S.projectMap && S.projectMap.files) || []).filter((f) => !f.error);
+  /* 大项目精简：孤立文件（没人引用也不启动）默认不进图 —— 139 个文件的图里
+     它们占掉大半列宽却什么都不解释。>45 个文件时自动开启，可用「精简」按钮切换 */
+  const autoTrim = GV.trim === undefined ? all.length > 45 : !!GV.trim;
+  GV.hiddenCount = 0;
+  let trimmed = false;
+  if (autoTrim) {
+    const hasEdge = new Set();
+    for (const e of ((S.projectMap && S.projectMap.edges) || [])) {
+      hasEdge.add(e.from); hasEdge.add(e.to);
+    }
+    const keep = all.filter((f) => f.kind === 'startup' || hasEdge.has(f.name));
+    if (keep.length >= 8) {         // 剪完太稀就放弃精简，避免只剩孤零零几个点
+      GV.hiddenCount = all.length - keep.length;
+      trimmed = true;
+      all = keep;
+    }
+  }
+  // 大图用紧凑节点（176×38）：同屏能多放 40% 的节点，字号不变只是盒子更瘦
+  const compact = all.length > 45;
+  const NW = compact ? 176 : GV_NW, NH = compact ? 38 : GV_NH, GAPY = compact ? 8 : GV_GAPY;
+
   const names = new Set(all.map((f) => f.name));
   const kindOf = new Map(all.map((f) => [f.name, f.kind]));
   const byName = new Map(all.map((f) => [f.name, f]));
@@ -5184,14 +5205,14 @@ function graphLayout() {
     if (prevLevel !== null && col.level !== prevLevel) x += 46;   // 层级之间留更宽的空隙
     col.x = x;
     col.nodes.forEach((f, i) => {
-      pos.set(f.name, { x, y: GV_TOP + i * (GV_NH + GV_GAPY), f, level: col.level });
+      pos.set(f.name, { x, y: GV_TOP + i * (NH + GAPY), f, level: col.level });
     });
     maxRows = Math.max(maxRows, col.nodes.length);
-    x += GV_NW + 34;
+    x += NW + 34;
     prevLevel = col.level;
   }
   const W = Math.max(x - 34 + GV_PAD, 480);
-  const H = GV_TOP + maxRows * (GV_NH + GV_GAPY) + GV_PAD;
+  const H = GV_TOP + maxRows * (NH + GAPY) + GV_PAD;
   // 边的端点
   const paths = [];
   for (const e of edges) {
@@ -5211,7 +5232,7 @@ function graphLayout() {
     }
     paths.push({ d, kind: e.kind, from: e.from, to: e.to });
   }
-  return { all, byName, cols, pos, paths, W, H: H, edges, kindOf, orphanLevel: maxL + 1 };
+  return { all, byName, cols, pos, paths, W, H: H, edges, kindOf, orphanLevel: maxL + 1, NW, NH, trimmed, compact };
 }
 
 /* ---- 渲染 SVG ---- */
@@ -5279,11 +5300,11 @@ function renderGraph(keepView) {
       .filter(Boolean).join(' · ');
     const busy = ranOf(c) && (c.events || c.via);
     s += `<g class="gn k-${f.kind}${GV.sel === f.name ? ' sel' : ''}${busy ? '' : (c ? ' dimmed' : '')}" data-file="${esc(f.name)}" transform="translate(${p.x},${p.y})">
-      <rect class="box" width="${GV_NW}" height="${GV_NH}" rx="9"/>
-      <text class="ico" x="9" y="19">${iconOf(f.kind)}</text>
-      <text class="nm" x="26" y="19">${esc(shortName(f.name))}</text>
-      <text class="sub" x="26" y="34">${esc(sub).slice(0, 44)}</text>
-      <text class="cov ${c ? c.cls : 'none'}" x="${GV_NW - 9}" y="19" text-anchor="end">${esc(c ? c.txt : '未跑')}</text>
+      <rect class="box" width="${model.NW}" height="${model.NH}" rx="9"/>
+      <text class="ico" x="9" y="${model.NH > 40 ? 19 : 17}">${iconOf(f.kind)}</text>
+      <text class="nm" x="26" y="${model.NH > 40 ? 19 : 17}">${esc(shortName(f.name))}</text>
+      <text class="sub" x="26" y="${model.NH > 40 ? 34 : 31}">${esc(sub).slice(0, 44)}</text>
+      <text class="cov ${c ? c.cls : 'none'}" x="${model.NW - 9}" y="${model.NH > 40 ? 19 : 17}" text-anchor="end">${esc(c ? c.txt : '未跑')}</text>
     </g>`;
   }
 
@@ -5291,6 +5312,13 @@ function renderGraph(keepView) {
   svg.setAttribute('height', model.H);
   svg.setAttribute('viewBox', `0 0 ${model.W} ${model.H}`);
   svg.innerHTML = s;
+  // 大图：整体压暗连线（选中节点时会聚焦提亮），小图保持原亮度
+  svg.classList.toggle('big', !!model.compact);
+  const tb = $('#gvTrim');
+  if (tb) {
+    tb.classList.toggle('on', !!model.trimmed);
+    tb.textContent = model.trimmed ? '精简·开' : '精简';
+  }
 
   // 顶部概览
   const sub = $('#gvSub');
@@ -5298,7 +5326,8 @@ function renderGraph(keepView) {
     const st = S.projectMap.stats || {};
     const ran = S.coverage ? [...S.coverage.keys()].filter((k) => model.byName.has(k)).length : 0;
     sub.textContent = `${model.all.length} 个文件 · ${st.startup || 0} 个启动入口 · ${st.module || 0} 个模块`
-      + (ran ? ` · 已跑过 ${ran} 个` : '');
+      + (ran ? ` · 已跑过 ${ran} 个` : '')
+      + (model.trimmed && GV.hiddenCount ? ` · 已隐藏 ${GV.hiddenCount} 个未参与调用的文件` : '');
   }
   if (!keepView) fitGraph();
   bindGraphNodes();
@@ -5348,6 +5377,8 @@ function selectGraphNode(name) {
   const f = (S.projectMap && S.projectMap.files || []).find((x) => x.name === name);
   const detail = $('#gvDetail');
   if (!f || !detail) return;
+  const svg = $('#gvSvg');
+  if (svg) svg.classList.add('focus');        // 聚焦模式：其余节点/连线整体变暗
   $$('#gvSvg .gn').forEach((g) => g.classList.toggle('sel', g.dataset.file === name));
   // 相关边高亮
   $$('#gvSvg .ge').forEach((p) => p.classList.toggle('hot', p.dataset.from === name || p.dataset.to === name));
@@ -5576,7 +5607,14 @@ async function runAllEntries() {
     if (GV.stop) break;
     const name = entries[i];
     setProg(i, entries.length, `正在跑 ${name.split('/').pop()}（${i + 1}/${entries.length}）…`);
-    const r = await runEntryOnce(name, timeout);
+    let r = await runEntryOnce(name, timeout);
+    // 连接类失败（WS 中断/未送达）自动重试一次：几十次连跑中一次网络/服务抖动
+    // 不该把整个入口判死刑 —— 用户实测"跑到 29/54 后全部连接失败"多属瞬时故障
+    if (r.errKind === 'link' && !GV.stop) {
+      setProg(i, entries.length, `${name.split('/').pop()} 连接抖动，重试中（${i + 1}/${entries.length}）…`);
+      await new Promise((res) => setTimeout(res, 800));
+      r = await runEntryOnce(name, timeout);
+    }
     bump(r.ok ? 'ok' : (r.errKind || 'error'));
     S.coverage.set(name, { events: r.events, ok: r.ok, ms: Math.round(r.ms), err: r.err,
       errKind: r.errKind || '', errHint: r.errHint || '', errText: r.errText || '' });
@@ -5588,6 +5626,8 @@ async function runAllEntries() {
       }
     }
     if (GV.view === 'graph') renderGraph(true);
+    // 批间缓冲：给服务端留出 GC / 落盘 / 子进程收尾的时间，几十次连跑更稳
+    await new Promise((res) => setTimeout(res, 350));
   }
 
   GV.running = false;
@@ -5665,11 +5705,18 @@ function bindGraph() {
     const d = $('#gvDetail');
     if (d) d.hidden = true;
     GV.sel = '';
+    svg.classList.remove('focus');
     $$('#gvSvg .gn').forEach((g) => g.classList.remove('sel'));
     $$('#gvSvg .ge').forEach((p) => p.classList.remove('hot'));
   });
 
   const fit = $('#gvFit'); if (fit) fit.onclick = () => fitGraph();
+  const trm = $('#gvTrim');
+  if (trm) trm.onclick = () => {
+    // undefined = 自动（大项目默认精简）；点一下强制开，再点强制关
+    GV.trim = (GV.trim === undefined) ? true : !GV.trim;
+    renderGraph();
+  };
   const gex = $('#gvExport'); if (gex) gex.onclick = () => exportReport(gex);
   const run = $('#gvRunAll'); if (run) run.onclick = () => runAllEntries();
   const stop = $('#gvStop');

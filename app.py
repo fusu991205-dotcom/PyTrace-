@@ -2271,7 +2271,7 @@ def _demo_match(code: str):
     return None
 
 
-APP_VERSION = "3.0.1"
+APP_VERSION = "3.0.2"
 
 
 @app.get("/api/info")
@@ -2936,6 +2936,10 @@ async def _ws_run_inner(ws: WebSocket, cfg: dict):
                                   "msg": _CRASH_MSGS[_u], "line": 0, "code": int(proc.returncode)})
     except Exception:
         pass
+
+    # 每次运行后都清一次旧运行目录：批量跑几十个入口时 events.jsonl 会持续堆积，
+    # 只靠启动时清一次的话，一个下午就能堆出几个 GB（Windows 上还会拖慢后续 spawn）
+    threading.Thread(target=_cleanup_runs, daemon=True).start()
 
     await _safe_send(ws, {"e": "done", "code": proc.returncode, "truncated": stats["truncated"],
                           "wall": round((time.time() - t0) * 1000, 1)})
