@@ -671,6 +671,7 @@ class Tracer:
         self.call_count = 0
         self.module_names = set()      # 模块帧 locals 白名单（用户顶层赋值的名字）
         self.fn_call_count = 0          # 用户自定义函数调用（不含模块帧）
+        self.called_names = set()       # 本次运行真实调用过的函数名（判定"库文件要不要演示"用）
         self.max_depth = 0
         self.ext_count = 0
         self.dbg = None                 # Debugger | None（--debug 时挂上）
@@ -806,6 +807,7 @@ class Tracer:
             self.call_count += 1
             if code.co_name != "<module>":      # 模块帧不算"用户函数被调用"
                 self.fn_call_count += 1
+                self.called_names.add(code.co_name)
         else:
             self.ext_count += 1
 
@@ -1333,22 +1335,38 @@ def _module_top_names(source: str) -> set:
     return names
 
 
+_RISKY_WORDS = frozenset((
+    # 名字含这些词的函数 / 类 / 方法不自动演示：疑似有外部副作用
+    # （写盘 / 删除 / 网络 / 子进程 / 状态变更）。演示宁可少，不可出事。
+    "del", "delete", "remove", "unlink", "rmtree", "clear", "truncate",
+    "write", "save", "update", "commit", "submit", "publish", "push", "post",
+    "send", "upload", "download", "install", "uninstall",
+    "exec", "eval", "popen", "system", "spawn", "kill", "terminate",
+    "connect", "request", "fetch", "query", "drop", "create", "start",
+    "launch", "run", "execute", "shutdown", "close", "stop", "abort",
+    "cancel", "flush", "format", "migrate",
+))
+
+
 def _framework_candidates(source: str):
     """检测「无入口文件」：没有 __main__ 入口、模块级也没调用过任何用户函数。
 
-    两种形态都算（它们共同的痛苦是"定义了但看不到执行"）：
+    三种形态都算（它们共同的痛苦是"定义了但看不到执行"）：
       1. 框架回调文件：顶层带装饰器的函数（LangChain middleware 等，框架负责触发）
       2. 普通脚本忘记写入口：def 了函数但没有 if __name__ == "__main__"
+      3. 纯类库文件：函数都定义在类里（如 SDK 的 client.py），顶层只有 class
 
-    返回 (函数名列表, 是否无入口文件)。带装饰器的排前面；_ 开头的内部函数跳过。
+    返回 (顶层函数名列表, 可演示的类 [(类名, [无参公有方法名])], 是否无入口文件)。
+    带装饰器的排前面；_ 开头的内部成员跳过。
     """
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return [], False
+        return [], [], False
 
     has_entry = False
     with_deco, plain = [], []
+    demo_classes = []                        # [(类名, [方法名...])]
     for node in tree.body:
         if isinstance(node, ast.If):
             t = ast.unparse(node.test)
@@ -1358,8 +1376,59 @@ def _framework_candidates(source: str):
             if node.name.startswith("_"):
                 continue
             (with_deco if node.decorator_list else plain).append(node.name)
+        elif isinstance(node, ast.ClassDef):
+            if node.name.startswith("_") or node.name in _RISKY_WORDS:
+                continue
+            methods = []
+            for sub in node.body:
+                if not isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if sub.name.startswith("_") or sub.name in _RISKY_WORDS:
+                    continue
+                a = sub.args
+                # 绑定调用时 self 不用传：其余位置参数全有默认值、关键字参数
+                # 全有默认值，才算"可以无参演示"
+                if len(a.defaults) < len(a.args) - 1:
+                    continue
+                if any(d is None for d in a.kw_defaults):
+                    continue
+                methods.append(sub.name)
+            if methods:
+                demo_classes.append((node.name, methods[:3]))
     names = (with_deco + plain)[:6]          # 最多演示 6 个，防刷屏
-    return names, (bool(names) and not has_entry)
+    return names, demo_classes[:2], (bool(names or demo_classes) and not has_entry)
+
+
+def _demo_run(tracer, thunk):
+    """在守护线程里真实执行一次演示调用，5 秒不返回就放弃。
+
+    为什么用线程：库文件的方法常常「阻塞等待外部条件」（队列 get、锁、网络），
+    在主线程里演示会把整个运行卡死（HarnessClient.next_notification 实测挂死）。
+    settrace 是线程级的：threading.settrace 只对之后新建的线程生效，
+    所以在子线程内部再设置一次，事件流不受影响。
+    返回 (返回值或 None, 异常或 None)。"""
+    box = {}
+
+    def _work():
+        tracer._demo = True
+        sys.settrace(tracer.global_trace)
+        try:
+            box["ret"] = thunk()
+        except BaseException as exc:          # noqa: BLE001 —— 演示的异常要可视化
+            box["exc"] = exc
+        finally:
+            sys.settrace(None)
+            tracer._demo = False
+
+    t = threading.Thread(target=_work, daemon=True)
+    t.start()
+    t.join(5.0)
+    if t.is_alive():
+        emit({"e": "note", "type": "Framework",
+              "msg": "演示调用 5 秒还没返回（在等队列 / 网络 / 锁等外部条件），"
+                     "演示到此为止 —— 真实调用需要先满足这些前置条件，不是代码坏了"})
+        return None, None
+    return box.get("ret"), box.get("exc")
 
 
 def _framework_demo(g, source, tracer):
@@ -1368,8 +1437,16 @@ def _framework_demo(g, source, tracer):
     这是旧版「逻辑推演 · 框架模式」在真实执行世界的对应物：
     语义不再被重写 —— try / if / 调用链 / 异常全都真跑，只有值是构造的。
     """
-    names, is_framework = _framework_candidates(source)
+    names, demo_classes, is_framework = _framework_candidates(source)
     if not is_framework:
+        return False
+
+    # 模块级的 @dataclass(...)、TypeVar(...)、logging.getLogger(...) 也会产生
+    # 真实的调用帧（deepseek-harness 的 client.py 实测 calls=7、全部是模块级
+    # 调用），所以不能只看调用总数 —— 按「候选函数是否被真实调用过」判定：
+    # 只要演示名单里还有一次都没被调过的函数，就值得演示。
+    names = [n for n in names if n not in tracer.called_names]
+    if not names and not demo_classes:
         return False
 
     # 装饰器可能把函数包成 wrapper：尽量还原用户写的那个原始函数体
@@ -1386,13 +1463,28 @@ def _framework_demo(g, source, tracer):
         "title": "这个文件没有程序入口（没有 if __name__ == \"__main__\"），PyTrace 自动演示一次调用",
         "steps": [
             "模块级只会执行 import 和函数定义 —— Python 本身不会去调用这些函数，所以你只看到了导入。这不代表文件有问题",
-            "PyTrace 现在用构造的演示入参把 %d 个函数**真实调用**一遍：try / if / 调用链 / 异常处理全部真跑，只有入参值是演示数据" % len(targets),
+            "PyTrace 现在把 %d 个函数、%d 个类**真实执行**一遍：try / if / 调用链 / 异常处理全部真跑，只有入参值是演示数据"
+            % (len(targets), len(demo_classes)),
             "被装饰器包着的函数（如 @tool、@wrap_tool_call）在真实程序里由框架自动触发；普通函数则应该在入口处（if __name__ == \"__main__\":）被调用",
             "提醒：执行是真实的 —— 函数里若有网络请求 / API 调用 / 写文件，演示时也会真的发生",
         ],
     })
 
     import inspect as _inspect
+    # 顶层公有类：库文件的另一半资产。类的 __init__ 可能有副作用，这里只
+    # 如实列出「提供了哪些类」，不自动构造实例 —— 构造留给用户填真参数。
+    try:
+        _cls = [(node.name, (ast.get_docstring(node) or "").strip().split("\n")[0][:48])
+                for node in ast.parse(source).body
+                if isinstance(node, ast.ClassDef) and not node.name.startswith("_")]
+    except Exception:
+        _cls = []
+    if _cls:
+        emit({"e": "note", "type": "Framework",
+              "msg": "文件里定义了 %d 个类：%s（可无参构造的会真实构造一次；"
+                     "其余构造可能有副作用，只列出不自动执行）"
+                     % (len(_cls), "、".join(n for n, _ in _cls[:6]))})
+
     called = 0
     for n, fn in targets:
         if fn is None:
@@ -1415,12 +1507,8 @@ def _framework_demo(g, source, tracer):
         emit({"e": "note", "type": "Framework",
               "msg": "演示调用 %s(%s) —— 入参是演示数据，执行路径真实" % (
                   n, "、".join(kwargs.keys()) or "无参")})
-        tracer._demo = True
-        sys.settrace(tracer.global_trace)
-        threading.settrace(tracer.global_trace)
-        try:
-            fn(**kwargs)
-        except SystemExit as exc:
+        _ret, exc = _demo_run(tracer, lambda fn=fn, kwargs=kwargs: fn(**kwargs))
+        if isinstance(exc, SystemExit):
             if exc.code not in (0, None):
                 with _OUT_LOCK:
                     out_txt = "".join(_OUTPUT_TAIL)
@@ -1433,7 +1521,7 @@ def _framework_demo(g, source, tracer):
                     emit({"e": "error", "type": "SystemExit",
                           "msg": "脚本主动调用 sys.exit(%s) 结束（非 0 退出码 = 按约定失败）" % (exc.code,),
                           "line": 0})
-        except BaseException as exc:              # 演示调用里的异常照常可视化
+        elif exc is not None:                     # 演示调用里的异常照常可视化
             tb_txt = "".join(_format_tb(exc, os.path.abspath(__file__)))
             emit({
                 "e": "error", "type": type(exc).__name__,
@@ -1447,15 +1535,53 @@ def _framework_demo(g, source, tracer):
                     tee.flush()
                 except Exception:
                     pass
-        finally:
-            sys.settrace(None)
-            threading.settrace(None)
-            tracer._demo = False
         called += 1
+
+    # 类演示：可无参构造的公有类真实构造一次，再挑它的无参公有方法各调用
+    # 一次。构造 / 调用都是真实执行（Guard 照常拦截副作用），只有入参是演示。
+    for cname, methods in demo_classes:
+        cls = g.get(cname)
+        if cls is None or not callable(cls):
+            continue
+        try:
+            _inspect.signature(cls)          # __init__ 不可解析就不碰
+            req = [p for p in _inspect.signature(cls).parameters.values()
+                   if p.default is _inspect.Parameter.empty
+                   and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+            if req:                          # 构造需要真实参数：不猜，如实说明
+                emit({"e": "note", "type": "Framework",
+                      "msg": "类 %s 构造需要参数（%s），演示不凭空编造 —— "
+                             "想看它的执行过程，写个小入口传真参数即可"
+                             % (cname, "、".join(p.name for p in req[:4]))})
+                continue
+        except (ValueError, TypeError):
+            continue
+        emit({"e": "note", "type": "Framework",
+              "msg": "演示构造 %s() —— 全字段有默认值，构造无副作用风险，真实执行" % cname})
+        _obj, exc = _demo_run(tracer, cls)
+        if exc is not None:
+            tb_txt = "".join(_format_tb(exc, os.path.abspath(__file__)))
+            emit({"e": "error", "type": type(exc).__name__,
+                  "msg": _safe_repr(exc, 400), "traceback": tb_txt[-4000:]})
+        called += 1
+        if _obj is None:
+            continue
+        for m in methods[:2]:
+            meth = getattr(_obj, m, None)
+            if meth is None or not callable(meth):
+                continue
+            emit({"e": "note", "type": "Framework",
+                  "msg": "演示调用 实例.%s() —— 执行路径真实，无参（全默认值）" % m})
+            _ret, exc = _demo_run(tracer, meth)
+            if exc is not None:
+                tb_txt = "".join(_format_tb(exc, os.path.abspath(__file__)))
+                emit({"e": "error", "type": type(exc).__name__,
+                      "msg": _safe_repr(exc, 400), "traceback": tb_txt[-4000:]})
+            called += 1
 
     if called:
         emit({"e": "note", "type": "Framework",
-              "msg": "演示结束：共真实执行 %d 个回调函数（入参为演示数据）" % called})
+              "msg": "演示结束：共真实执行 %d 次调用（函数 / 构造，入参为演示数据）" % called})
     return called > 0
 
 
@@ -1873,7 +1999,9 @@ def main() -> int:
 
     # 框架回调文件（只有 import + def、无入口）：自动演示调用一次，
     # 让新手能看到这些回调函数体真实执行的过程（入参是演示数据，界面有标注）
-    if ok and not stopped and tracer.fn_call_count == 0 and not bool(os.environ.get("PYTRACE_NO_DEMO")):
+    # 库文件（无 __main__）自动演示：触发与否由 _framework_demo 内部按
+    # 「演示候选是否被真实调用过」判定（模块级装饰器调用不该挡住演示）
+    if ok and not stopped and not bool(os.environ.get("PYTRACE_NO_DEMO")):
         _framework_demo(g, source, tracer)
 
     builtins.__import__ = _orig_import

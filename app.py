@@ -2275,7 +2275,7 @@ def _demo_match(code: str):
     return None
 
 
-APP_VERSION = "3.0.6"
+APP_VERSION = "3.0.7"
 
 
 @app.get("/api/info")
