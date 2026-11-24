@@ -203,19 +203,6 @@ PyTrace/
 └── README.md
 ```
 
-## 🔭 参考的开源同类项目
-
-| 项目 | 借鉴点 |
-|---|---|
-| [VizTracer](https://github.com/gaogaotiantian/viztracer) | 全量函数追踪 + 时间轴瀑布图（本项目的调用树/瀑布图思路来源） |
-| [Birdseye](https://github.com/alexmojaki/birdseye) | 事后查看每次调用的入参/返回值/表达式 |
-| [Heartrate](https://github.com/alexmojaki/heartrate) | 实时逐行执行可视化 + 行点击查看变量 |
-| [Python Tutor](https://github.com/pgbovine/OnlinePythonTutor) | 逐步回放式教学可视化 |
-| [snoop](https://github.com/alexmojaki/snoop) / [PySnooper](https://github.com/cool-RR/PySnooper) | 函数入参、局部变量、返回值的行级打印 |
-| [pyinstrument](https://github.com/joerick/pyinstrument) / [memray](https://github.com/bloomberg/memray) | 调用聚合统计与时间占比条形图 |
-
-PyTrace 把它们的共同能力（追踪 → 聚合 → 可视化 → 回放）浓缩成了一个零配置的本地小工具。
-
 ## ❓ FAQ
 
 - **为什么有的库调用只显示一层？** 为了性能与可读性，标准库/三方库只展开用户直接调用的那一层，
