@@ -110,6 +110,7 @@ function renderCode() {
   $('#codeMeta').textContent = lines.length ? `${lines.length} 行` : '—';
   $('#fileChip').textContent = S.code ? S.filename : '未选择文件';
   $('#fileChip').classList.toggle('on', !!S.code);
+  if (typeof fitTopbar === 'function') fitTopbar(true);   // chip 变宽/变窄都要重新收纳（flex 盒子不变，RO 察觉不到内容收缩）
   $('#dropzone').classList.toggle('show', !S.code);
   lastLine = -1; lastErr = -1;
   S.flowKey = '';
@@ -1771,7 +1772,7 @@ function resetDerived() {
   S.cursor = 0; S.playing = false; S.progress = 0;
   S.spans = new Map(); S.order = []; S.roots = [];
   S.imports = []; S.importAgg = new Map();
-  S.stdout = ''; S.stderr = ''; S.notes = []; S.errors = [];
+  S.stdout = ''; S.stderr = ''; S.notes = []; S.errors = []; S.handledNotes = [];
   S.curLine = 0; S.lineOf = new Map(); S.stack = [];
   S.span = 1; S.endMs = 0; S.stats = null; S.wall = 0;
   S.sel = null; S.flowKey = '';
@@ -1901,6 +1902,9 @@ function applyEvent(ev) {
       } else if (ev.type === 'CliTool') {
         toast(ev.msg, 'warn');
         S.notes.push(ev.msg);
+      } else if (ev.type === 'Handled') {
+        // 被 try/except 接住的异常：紧跟在异常提示后面渲染（澄清"不是中断"），用绿色
+        S.handledNotes.push(ev.msg);
       } else {
         S.notes.push(ev.msg);
         if (ev.type === 'Project') toast(ev.msg, 'ok');
@@ -1909,6 +1913,7 @@ function applyEvent(ev) {
       break;
     case 'error': {
       S.errors.push({ type: ev.type, msg: ev.msg, line: ev.line, fatal: true, tb: ev.traceback });
+      if (ev.type === 'Crash') toast(ev.msg, 'err');   // 0xC0000005 等环境级崩溃：立刻弹提示，别让用户自己猜
       if (ev.line) markErrorLine(ev.line);
       break;
     }
@@ -2228,7 +2233,7 @@ function renderInspector() {
 /* ---------------------------- 控制台 ---------------------------- */
 function renderConsole() {
   const box = $('#consoleBody');
-  if (!S.stdout && !S.stderr && !S.errors.length && !S.notes.length) {
+  if (!S.stdout && !S.stderr && !S.errors.length && !S.notes.length && !S.handledNotes.length) {
     box.innerHTML = '<div class="empty"><p>暂无输出</p><small>程序里的 print() / stderr 会实时显示在这里</small></div>';
     return;
   }
@@ -2240,10 +2245,12 @@ function renderConsole() {
   for (const e of S.errors) {
     h += `\n<span class="err">[${esc(e.type)}] ${esc(e.msg)}</span>`;
     if (e.line) {
-      h += `\n<span class="warn">↑ 第 ${e.line} 行抛出的异常：这段代码在真实 Python 里也会这样中断，PyTrace 只观测、不改写你的代码</span>`;
+      h += `\n<span class="warn">↑ 第 ${e.line} 行抛出的异常（下方有 ✔ = 已被 try/except 接住、程序继续跑；没有 ✔ = 程序在此中断）</span>`;
     }
     if (e.tb) h += `\n<span class="err">${esc(String(e.tb).split('\n').slice(-6).join('\n'))}</span>`;
   }
+  // 被捕获的异常澄清：放在异常提示后面，先看到"抛了"，紧接着看到"接住了、继续跑"
+  for (const n of S.handledNotes) h += `\n<span class="ok">✔ ${esc(n)}</span>`;
   box.innerHTML = h || '<div class="empty"><p>暂无输出</p></div>';
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
@@ -2630,9 +2637,8 @@ async function run() {
       toast('提交运行失败：' + (err && err.message ? err.message : err), 'err');
     }
   };
-  ws.onmessage = (e) => {
-    let ev;
-    try { ev = JSON.parse(e.data); } catch { return; }
+  // 后端事件攒批：一条 WS 消息可能是数组（一次 parse 处理一批）
+  const onRunEvent = (ev) => {
     if (ev.e === 'accepted') { S.runId = ev.run; S.wsAccepted = true; return; }
     if (ev.e === 'done') {
       S.wsAccepted = true;
@@ -2693,6 +2699,11 @@ async function run() {
       }
     }
     if (S.following) { applyEvent(ev); S.cursor = S.events.length; schedule(80); }
+  };
+  ws.onmessage = (e) => {
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
+    (Array.isArray(data) ? data : [data]).forEach(onRunEvent);
   };
   ws.onclose = () => {
     setRunning(false);
@@ -2884,6 +2895,7 @@ function loadCode(code, name) {
   renderReadCard();          // 这个文件是什么（启动入口 / 模块 / 独立脚本）
   $('#fileChip').textContent = S.filename;
   $('#fileChip').classList.add('on');
+  if (typeof fitTopbar === 'function') fitTopbar(true);   // 同上：内容变化 RO 察觉不到，主动量一次
   $('#dropzone').classList.remove('show');
   syncDocFileSel();
   if (typeof GV !== 'undefined' && GV.view === 'doc') loadExplain(true);
@@ -2959,6 +2971,10 @@ async function updateProjectMap() {
       body: JSON.stringify({ files: files.map((f) => ({ name: f.name, code: f.code })) }),
     })).json();
     if (r && Array.isArray(r.files)) {
+      if (!r.files.length) {
+        toast('结构扫描没有解析到任何 .py 文件 —— 这个目录里可能只有其他语言的源码（ts/go/rs 等），全景图只支持 Python 项目', '');
+        return;
+      }
       S.projectMap = r;
       renderFileTree();          // 角标随分级刷新
       fillEntrySel();            // 下拉框分组刷新
@@ -2974,7 +2990,9 @@ async function updateProjectMap() {
         renderReadCard();        // 阅读卡随分级刷新
       }
     }
-  } catch (e) { /* 静默 */ }
+  } catch (e) {
+    toast('项目结构扫描失败（' + (e && e.message ? e.message : '网络/服务异常') + '）—— 全景图暂时不可用，文件树与运行不受影响', '');
+  }
 }
 
 function fillEntrySel() {
@@ -3718,7 +3736,9 @@ function bind() {
     btnRecent.onclick = () => {
       if (rp.hidden) {
         renderRecent();
-        // fixed 定位：贴着按钮下缘摆放，屏幕右缘兜底
+        // 先重新收纳再定位：面板贴着按钮当前真实位置弹出。
+        // 不先量的话，按钮若滞留在"曾被收纳挤压"的旧位置，面板会盖住别的控件
+        if (typeof fitTopbar === 'function') fitTopbar(true);
         const r = btnRecent.getBoundingClientRect();
         rp.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 356)) + 'px';
         rp.style.top = (r.bottom + 6) + 'px';
@@ -4058,9 +4078,9 @@ function connectLive() {
   const ws = new WebSocket(`${proto}://${location.host}/ws/live`);
   LIVE.ws = ws;
   ws.onmessage = (m) => {
-    let ev;
-    try { ev = JSON.parse(m.data); } catch (e) { return; }
-    handleLiveEvent(ev);
+    let data;
+    try { data = JSON.parse(m.data); } catch (e) { return; }
+    (Array.isArray(data) ? data : [data]).forEach(handleLiveEvent);
   };
   ws.onclose = () => {
     LIVE.ws = null;
@@ -5131,7 +5151,28 @@ function covLabel(name) {
 
 /* ---- 布局：按依赖深度分列，列内按目录聚拢 ---- */
 function graphLayout() {
-  const all = ((S.projectMap && S.projectMap.files) || []).filter((f) => !f.error);
+  let all = ((S.projectMap && S.projectMap.files) || []).filter((f) => !f.error);
+  /* 大项目精简：孤立文件（没人引用也不启动）默认不进图 —— 139 个文件的图里
+     它们占掉大半列宽却什么都不解释。>45 个文件时自动开启，可用「精简」按钮切换 */
+  const autoTrim = GV.trim === undefined ? all.length > 45 : !!GV.trim;
+  GV.hiddenCount = 0;
+  let trimmed = false;
+  if (autoTrim) {
+    const hasEdge = new Set();
+    for (const e of ((S.projectMap && S.projectMap.edges) || [])) {
+      hasEdge.add(e.from); hasEdge.add(e.to);
+    }
+    const keep = all.filter((f) => f.kind === 'startup' || hasEdge.has(f.name));
+    if (keep.length >= 8) {         // 剪完太稀就放弃精简，避免只剩孤零零几个点
+      GV.hiddenCount = all.length - keep.length;
+      trimmed = true;
+      all = keep;
+    }
+  }
+  // 大图用紧凑节点（176×38）：同屏能多放 40% 的节点，字号不变只是盒子更瘦
+  const compact = all.length > 45;
+  const NW = compact ? 176 : GV_NW, NH = compact ? 38 : GV_NH, GAPY = compact ? 8 : GV_GAPY;
+
   const names = new Set(all.map((f) => f.name));
   const kindOf = new Map(all.map((f) => [f.name, f.kind]));
   const byName = new Map(all.map((f) => [f.name, f]));
@@ -5183,14 +5224,14 @@ function graphLayout() {
     if (prevLevel !== null && col.level !== prevLevel) x += 46;   // 层级之间留更宽的空隙
     col.x = x;
     col.nodes.forEach((f, i) => {
-      pos.set(f.name, { x, y: GV_TOP + i * (GV_NH + GV_GAPY), f, level: col.level });
+      pos.set(f.name, { x, y: GV_TOP + i * (NH + GAPY), f, level: col.level });
     });
     maxRows = Math.max(maxRows, col.nodes.length);
-    x += GV_NW + 34;
+    x += NW + 34;
     prevLevel = col.level;
   }
   const W = Math.max(x - 34 + GV_PAD, 480);
-  const H = GV_TOP + maxRows * (GV_NH + GV_GAPY) + GV_PAD;
+  const H = GV_TOP + maxRows * (NH + GAPY) + GV_PAD;
   // 边的端点
   const paths = [];
   for (const e of edges) {
@@ -5210,7 +5251,7 @@ function graphLayout() {
     }
     paths.push({ d, kind: e.kind, from: e.from, to: e.to });
   }
-  return { all, byName, cols, pos, paths, W, H: H, edges, kindOf, orphanLevel: maxL + 1 };
+  return { all, byName, cols, pos, paths, W, H: H, edges, kindOf, orphanLevel: maxL + 1, NW, NH, trimmed, compact };
 }
 
 /* ---- 渲染 SVG ---- */
@@ -5226,6 +5267,7 @@ function renderGraph(keepView) {
   }
   if (empty) empty.hidden = true;
   GV.nodes = model.all;
+  GV.cols = model.cols;
   GV.W = model.W; GV.H = model.H;
 
   const cov = (n) => covLabel(n);
@@ -5278,11 +5320,11 @@ function renderGraph(keepView) {
       .filter(Boolean).join(' · ');
     const busy = ranOf(c) && (c.events || c.via);
     s += `<g class="gn k-${f.kind}${GV.sel === f.name ? ' sel' : ''}${busy ? '' : (c ? ' dimmed' : '')}" data-file="${esc(f.name)}" transform="translate(${p.x},${p.y})">
-      <rect class="box" width="${GV_NW}" height="${GV_NH}" rx="9"/>
-      <text class="ico" x="9" y="19">${iconOf(f.kind)}</text>
-      <text class="nm" x="26" y="19">${esc(shortName(f.name))}</text>
-      <text class="sub" x="26" y="34">${esc(sub).slice(0, 44)}</text>
-      <text class="cov ${c ? c.cls : 'none'}" x="${GV_NW - 9}" y="19" text-anchor="end">${esc(c ? c.txt : '未跑')}</text>
+      <rect class="box" width="${model.NW}" height="${model.NH}" rx="9"/>
+      <text class="ico" x="9" y="${model.NH > 40 ? 19 : 17}">${iconOf(f.kind)}</text>
+      <text class="nm" x="26" y="${model.NH > 40 ? 19 : 17}">${esc(shortName(f.name))}</text>
+      <text class="sub" x="26" y="${model.NH > 40 ? 34 : 31}">${esc(sub).slice(0, 44)}</text>
+      <text class="cov ${c ? c.cls : 'none'}" x="${model.NW - 9}" y="${model.NH > 40 ? 19 : 17}" text-anchor="end">${esc(c ? c.txt : '未跑')}</text>
     </g>`;
   }
 
@@ -5290,6 +5332,13 @@ function renderGraph(keepView) {
   svg.setAttribute('height', model.H);
   svg.setAttribute('viewBox', `0 0 ${model.W} ${model.H}`);
   svg.innerHTML = s;
+  // 大图：整体压暗连线（选中节点时会聚焦提亮），小图保持原亮度
+  svg.classList.toggle('big', !!model.compact);
+  const tb = $('#gvTrim');
+  if (tb) {
+    tb.classList.toggle('on', !!model.trimmed);
+    tb.textContent = model.trimmed ? '精简·开' : '精简';
+  }
 
   // 顶部概览
   const sub = $('#gvSub');
@@ -5297,9 +5346,21 @@ function renderGraph(keepView) {
     const st = S.projectMap.stats || {};
     const ran = S.coverage ? [...S.coverage.keys()].filter((k) => model.byName.has(k)).length : 0;
     sub.textContent = `${model.all.length} 个文件 · ${st.startup || 0} 个启动入口 · ${st.module || 0} 个模块`
-      + (ran ? ` · 已跑过 ${ran} 个` : '');
+      + (ran ? ` · 已跑过 ${ran} 个` : '')
+      + (model.trimmed && GV.hiddenCount ? ` · 已隐藏 ${GV.hiddenCount} 个未参与调用的文件` : '');
   }
-  if (!keepView) fitGraph();
+  if (!keepView) {
+    fitGraph();
+    // 大项目初始聚焦：几百个文件哪怕缩放可读也读不过来，默认选中第一个
+    // 启动入口（高亮它 + 详情面板），用户一眼知道"从哪开始读"，其余部分靠平移
+    try {
+      const cvs = $('#gvCanvas');
+      if (cvs && GV.W > cvs.clientWidth * 2 && !GV.sel) {
+        const st = model.all.find((f) => f.kind === 'startup');
+        if (st) selectGraphNode(st.name);
+      }
+    } catch (e) { /* 初始聚焦失败不影响看图 */ }
+  }
   bindGraphNodes();
 }
 
@@ -5315,11 +5376,25 @@ function fitGraph() {
   const r = cvs.getBoundingClientRect();
   if (r.width < 20) return;
   const pad = 26;
-  // 小项目允许放大到 1.6 倍撑满画布（只缩不放会让 3 个节点的图缩在中间一小团）
-  GV.scale = Math.min(1.6, (r.width - pad * 2) / GV.W, (r.height - pad * 2) / GV.H);
-  GV.scale = Math.max(0.18, GV.scale);
-  GV.tx = Math.max(pad, (r.width - GV.W * GV.scale) / 2);
-  GV.ty = Math.max(pad / 2, (r.height - GV.H * GV.scale) / 2);
+  // 大项目（几百个文件、几十列）不能把整张图压进屏幕：压进去每个节点只剩几个
+  // 像素，用户看到的就是一条叠死的模糊横带（真实项目 faker 806 文件实测）。
+  // 保证节点可读的下限缩放，初始停在「启动入口」那一列，其余靠平移/缩放看。
+  const fit = Math.min(1.6, (r.width - pad * 2) / GV.W, (r.height - pad * 2) / GV.H);
+  const huge = GV.W > (r.width - pad * 2) * 2;      // 画布远宽于视口 → 大项目
+  GV.scale = huge ? Math.max(0.7, fit) : fit;
+  const sW = GV.W * GV.scale, sH = GV.H * GV.scale;
+  if (huge && sW > r.width - pad * 2) {
+    // 横向锚定启动入口列（第 0 层第一列），纵向居中；边界留白兜底
+    const c0 = (GV.cols || []).find((c) => c.level === 0) || (GV.cols || [])[0];
+    const ax = c0 ? c0.x + 100 : 0;
+    GV.tx = pad - ax * GV.scale;
+    GV.ty = Math.max(pad / 2, (r.height - sH) / 2);
+    if (GV.tx > pad) GV.tx = pad;                     // 画布其实没那么宽：靠左即可
+    if (GV.tx + sW < r.width - pad) GV.tx = r.width - pad - sW;
+  } else {
+    GV.tx = Math.max(pad, (r.width - sW) / 2);
+    GV.ty = Math.max(pad / 2, (r.height - sH) / 2);
+  }
   applyGvTransform();
 }
 
@@ -5347,6 +5422,8 @@ function selectGraphNode(name) {
   const f = (S.projectMap && S.projectMap.files || []).find((x) => x.name === name);
   const detail = $('#gvDetail');
   if (!f || !detail) return;
+  const svg = $('#gvSvg');
+  if (svg) svg.classList.add('focus');        // 聚焦模式：其余节点/连线整体变暗
   $$('#gvSvg .gn').forEach((g) => g.classList.toggle('sel', g.dataset.file === name));
   // 相关边高亮
   $$('#gvSvg .ge').forEach((p) => p.classList.toggle('hot', p.dataset.from === name || p.dataset.to === name));
@@ -5518,9 +5595,7 @@ function runEntryOnce(name, timeout) {
       try { ws.send(JSON.stringify(buildRunPayload(f.code, name, timeout, true))); }
       catch (e) { done({ err: '消息发送失败' }); }
     };
-    ws.onmessage = (e) => {
-      let ev;
-      try { ev = JSON.parse(e.data); } catch { return; }
+    const onEntryEvent = (ev) => {
       if (ev.e === 'accepted') { res.accepted = true; return; }
       if (ev.e === 'done') {
         const code = ev.code || 0;
@@ -5542,6 +5617,12 @@ function runEntryOnce(name, timeout) {
         res.errMsg = String(ev.msg || '');
         res.errType = String(ev.type || '');
       }
+    };
+    // 攒批后端会发「数组」消息；单条消息也兼容（新旧后端通用）
+    ws.onmessage = (e) => {
+      let data;
+      try { data = JSON.parse(e.data); } catch { return; }
+      (Array.isArray(data) ? data : [data]).forEach(onEntryEvent);
     };
     ws.onerror = () => done({ err: '连接失败', errKind: 'link', errHint: '与本地服务的连接出错，确认服务窗口还在运行' });
     ws.onclose = () => done(res.accepted
@@ -5575,7 +5656,14 @@ async function runAllEntries() {
     if (GV.stop) break;
     const name = entries[i];
     setProg(i, entries.length, `正在跑 ${name.split('/').pop()}（${i + 1}/${entries.length}）…`);
-    const r = await runEntryOnce(name, timeout);
+    let r = await runEntryOnce(name, timeout);
+    // 连接类失败（WS 中断/未送达）自动重试一次：几十次连跑中一次网络/服务抖动
+    // 不该把整个入口判死刑 —— 用户实测"跑到 29/54 后全部连接失败"多属瞬时故障
+    if (r.errKind === 'link' && !GV.stop) {
+      setProg(i, entries.length, `${name.split('/').pop()} 连接抖动，重试中（${i + 1}/${entries.length}）…`);
+      await new Promise((res) => setTimeout(res, 800));
+      r = await runEntryOnce(name, timeout);
+    }
     bump(r.ok ? 'ok' : (r.errKind || 'error'));
     S.coverage.set(name, { events: r.events, ok: r.ok, ms: Math.round(r.ms), err: r.err,
       errKind: r.errKind || '', errHint: r.errHint || '', errText: r.errText || '' });
@@ -5587,6 +5675,8 @@ async function runAllEntries() {
       }
     }
     if (GV.view === 'graph') renderGraph(true);
+    // 批间缓冲：给服务端留出 GC / 落盘 / 子进程收尾的时间，几十次连跑更稳
+    await new Promise((res) => setTimeout(res, 350));
   }
 
   GV.running = false;
@@ -5664,29 +5754,125 @@ function bindGraph() {
     const d = $('#gvDetail');
     if (d) d.hidden = true;
     GV.sel = '';
+    svg.classList.remove('focus');
     $$('#gvSvg .gn').forEach((g) => g.classList.remove('sel'));
     $$('#gvSvg .ge').forEach((p) => p.classList.remove('hot'));
   });
 
   const fit = $('#gvFit'); if (fit) fit.onclick = () => fitGraph();
+  const trm = $('#gvTrim');
+  if (trm) trm.onclick = () => {
+    // undefined = 自动（大项目默认精简）；点一下强制开，再点强制关
+    GV.trim = (GV.trim === undefined) ? true : !GV.trim;
+    renderGraph();
+  };
   const gex = $('#gvExport'); if (gex) gex.onclick = () => exportReport(gex);
   const run = $('#gvRunAll'); if (run) run.onclick = () => runAllEntries();
   const stop = $('#gvStop');
   if (stop) stop.onclick = () => { GV.stop = true; stop.textContent = '正在停止…'; };
   const lim = $('#gvLimit');
   if (lim) lim.onchange = () => { if (S.projectMap) renderGraph(); };
-  window.addEventListener('resize', () => { if (GV.view === 'graph') fitGraph(); });
+  let _rszT = null;
+  window.addEventListener('resize', () => {
+    // 窗口尺寸变化后画面滞留旧布局（左列被裁在容器外）：防抖后强制重新适配
+    if (GV.view !== 'graph') return;
+    clearTimeout(_rszT);
+    _rszT = setTimeout(() => { GV.tx = 0; GV.ty = 0; fitGraph(); }, 120);
+  });
   markGraphAvail();
+}
+
+/* ================= 顶栏自适应收纳（JS 实测驱动，替代固定断点） =================
+   原理：真的去量 topbar.scrollWidth 是否超过 clientWidth，溢出就按优先级
+   从低到高逐个隐藏，窗口变宽再逐个放回。优点：
+   ① exe 的 --app 窗口可以拖到任意宽度，固定断点永远追不上；
+   ② 不依赖 :has()（旧版 Edge 不支持，断点规则会整段失效）；
+   ③ 元素字体加载、下拉选项异步填充导致的内容变宽也能被 ResizeObserver 捕获。
+   「示例」与「项目目录」二选一保命：没填项目目录的用户（在线预览 / 纯单文件）
+   靠「示例」下拉载入代码，此时目录框先藏；填了项目目录的用户正相反。
+   永远保留：解释器 / 自检 / 调试 / 运行 / 文件名 chip。 */
+function tbBuildOrder() {
+  const rootEl = document.querySelector('#rootInput');
+  const rootBusy = !!(rootEl && rootEl.value);
+  const common = ['#argvInput', '#timeoutInput', '#btnEnvCheck', '#btnOpen', '#btnRecent', '#btnOpenDir'];
+  const last = rootBusy
+    ? ['#sampleSel']                              // 有项目目录：示例先藏，目录保到最后
+    : ['#rootInput'];                             // 无项目目录：目录先藏，示例永不藏
+  // 最后两级兜底：副标题「Python 运行可视化工作台」→ 品牌文字只剩 Logo
+  const brand = ['.brand-text small', '.brand-text'];
+  // pyChip / verChip 是纯信息徽章（Python 版本 / PyTrace 版本），优先级最低；
+  // 它们在解释器检测后被 JS 显示，若不纳管会在 1000px 左右凭空多占 220px+
+  return ['#pyChip', '#verChip', '#btnLive', ...common, ...last, ...brand];
+}
+let _tbItems = null;
+function fitTopbar(allowRestore) {
+  const tb = document.querySelector('.topbar');
+  if (!tb) return;
+  // 每次都按当前状态重建优先级（项目目录填/清空会反转示例与目录的优先级）；
+  // 收纳状态记在元素自己的 tb-hide 类上，重建不会丢
+  _tbItems = tbBuildOrder()
+    .map((s) => { const el = document.querySelector(s); return el ? (el.closest('.mini') || el) : null; })
+    .filter(Boolean);
+  const visible = () => _tbItems.filter((el) => !el.classList.contains('tb-hide'));
+  // 溢出判定必须同时看三个层级：
+  // ① topbar 自身（runbar 撑出）② filebar 内部 ③ brand 内部。
+  // 只看 ① 会被 flex 欺骗：filebar/brand 被压窄后，里面的按钮不会跟着缩，
+  // 而是溢出盒子叠到相邻区域——这正是此前反复出现的"顶栏重叠"的真正机制
+  const _fb = document.querySelector('.filebar');
+  const _br = document.querySelector('.brand');
+  const over = () => tb.scrollWidth > tb.clientWidth + 1
+    || (_fb && _fb.scrollWidth > _fb.clientWidth + 1)
+    || (_br && _br.scrollWidth > _br.clientWidth + 1);
+  let guard = 0;
+  // squeeze 判定永远在「无 squeeze」基准上做（先摘掉再量），否则
+  // squeeze 生效→溢出归零→摘掉→又溢出→再戴上 的 RO 反馈环会无限振荡
+  const hadSqueeze = tb.classList.contains('tb-squeeze');
+  if (hadSqueeze) tb.classList.remove('tb-squeeze');
+  // 空间不足：从最低优先级的可见项开始逐个藏，直到放下为止
+  while (over() && visible().length && guard++ < _tbItems.length + 2) {
+    visible()[0].classList.add('tb-hide');
+  }
+  // 极窄兜底：所有收纳层级用尽仍放不下 → 两个下拉压到 120px
+  const stillOverflow = over();
+  tb.classList.toggle('tb-squeeze', stillOverflow);
+  // 空间富余：从最高优先级的隐藏项开始逐个试放（放不进就退回并停止）。
+  // 试放判定必须用完整 over()（含 filebar/brand 内部溢出）——只看顶栏的话，
+  // 放回的项会被 flex 伪装成"放得下"，实际把 filebar 重新压出内部重叠
+  if (allowRestore && !stillOverflow) {
+    const hidden = _tbItems.filter((el) => el.classList.contains('tb-hide'));
+    for (const el of hidden.reverse()) {
+      el.classList.remove('tb-hide');
+      if (over()) { el.classList.add('tb-hide'); break; }
+    }
+  }
 }
 
 (async function init() {
   loadBreaks();            // 断点与调试偏好：localStorage 持久化，重开页面还在
   bind();
   bindGraph();
+  // 顶栏自适应收纳：初始量一次；窗口缩放与内容变化都允许"放回"——
+  // 否则「目录项目 chip 变长时藏掉的按钮，换回单文件后永远回不来」，
+  // 面板 anchored 在滞留的按钮上还会盖住别的控件。
+  // restore 自带"放不下就退回"保护不会振荡；squeeze 振荡已用无 squeeze 基准测量解决。
+  fitTopbar(true);
+  let _tbRzT = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(_tbRzT);
+    _tbRzT = setTimeout(() => fitTopbar(true), 120);
+  });
+  const tbRO = new ResizeObserver(() => fitTopbar(true));
+  const _fb = document.querySelector('.filebar'), _rb = document.querySelector('.runbar');
+  if (_fb) tbRO.observe(_fb);
+  if (_rb) tbRO.observe(_rb);
+  document.fonts && document.fonts.ready.then(() => fitTopbar(true));
   await loadSamples();     // 仅填充「示例」下拉，不自动载入
   await detectDemo();
   await loadInterpreters(); // 找出本机能跑这份代码的 Python
   loadLocalProject();      // 上次填过的项目目录 → 自动扫描整个文件夹
+  fitTopbar(true);         // 解释器列表 / 项目目录填充后可能变宽，重新量一次
+  { const _ri = document.querySelector('#rootInput');
+    if (_ri) _ri.addEventListener('change', () => fitTopbar(true)); }
   // 进入主程序默认为空状态：不显示内置示例内容，
   // 需要示例时从顶栏「示例」下拉中选择，或拖入自己的 .py / 文件夹
   renderCode();            // S.code 为空 → 显示拖入引导

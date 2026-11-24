@@ -51,18 +51,21 @@ async def session(decide, breakpoints=(), timeout=30):
                 raw = await asyncio.wait_for(ws.recv(), timeout=timeout + 40)
             except asyncio.TimeoutError:
                 break
-            o = json.loads(raw)
-            if o.get("e") == "done":
-                done = o
+            data = json.loads(raw)
+            for o in (data if isinstance(data, list) else [data]):
+                if o.get("e") == "done":
+                    done = o
+                    break
+                if o.get("e") == "dbg" and o.get("kind") == "paused":
+                    pauses.append(o)
+                    cmd = decide(n, o)
+                    n += 1
+                    for c in ([cmd] if isinstance(cmd, str) else (cmd or [])):
+                        await ws.send(json.dumps({"cmd": c} if isinstance(c, str) else c))
+                else:
+                    events.append(o)
+            if done is not None:
                 break
-            if o.get("e") == "dbg" and o.get("kind") == "paused":
-                pauses.append(o)
-                cmd = decide(n, o)
-                n += 1
-                for c in ([cmd] if isinstance(cmd, str) else (cmd or [])):
-                    await ws.send(json.dumps({"cmd": c} if isinstance(c, str) else c))
-            else:
-                events.append(o)
     return pauses, events, done
 
 
@@ -128,11 +131,10 @@ async def t_no_debug():
                 raw = await asyncio.wait_for(ws.recv(), timeout=40)
             except asyncio.TimeoutError:
                 break
-            o = json.loads(raw)
-            if o.get("e") == "done":
-                events.append(o)
+            data = json.loads(raw)
+            events.extend(data if isinstance(data, list) else [data])
+            if (data if isinstance(data, list) else [data])[-1].get("e") == "done":
                 break
-            events.append(o)
     check("没有任何 dbg 事件", not [e for e in events if e.get("e") == "dbg"])
     check("正常结束", events[-1].get("code") == 0, events[-1])
     check("行事件照常有", len([e for e in events if e.get("e") == "line"]) > 3)

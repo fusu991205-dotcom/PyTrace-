@@ -29,11 +29,12 @@ async def run_file(path, files=None):
         }))
         while True:
             try:
-                o = json.loads(await asyncio.wait_for(ws.recv(), timeout=40))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=40))
             except Exception:
                 break
-            evs.append(o)
-            if o.get("e") == "done":
+            items = data if isinstance(data, list) else [data]
+            evs.extend(items)
+            if items[-1].get("e") == "done":
                 break
     return evs
 

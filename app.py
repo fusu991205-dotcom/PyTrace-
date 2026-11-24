@@ -1554,6 +1554,10 @@ def _project_scan(files: list) -> dict:
     阅读即可）。两者互斥，避免"所有 .py 都标入口"的误导。
     """
     items = []
+    # .py 优先：前端会按名称字典序重排文件（大仓库里 .py 常常落在列表尾部，
+    # deepseek-harness 2000 文件实测：python/ 下的 84 个 .py 被 [:1500] 整体挤出，
+    # 分析结果为 0、全景图空白且无提示）。扫描顺序与传入顺序解耦：只分析 .py。
+    files = [f for f in files if str(f.get("name") or "").replace("\\", "/").lstrip("/").endswith(".py")]
     # 先建"目录 → 是否包"的索引，供相对导入（from .x import y）解析
     py_names = set()
     for f in files[:1500]:
@@ -2271,7 +2275,7 @@ def _demo_match(code: str):
     return None
 
 
-APP_VERSION = "3.0.2"
+APP_VERSION = "3.0.6"
 
 
 @app.get("/api/info")
@@ -2374,10 +2378,71 @@ def _line_annotations(files: list) -> dict:
 
 async def _pump(ws: WebSocket, proc, event_path: Path, send_stats: dict, ann: dict | None = None,
                 clock: dict | None = None):
-    """边跑边读事件文件，逐条推给前端。"""
+    """边跑边读事件文件，攒批推给前端。"""
     buf = ""
     offset = 0
     idle_rounds = 0
+    # 攒批发送（借鉴 birdseye「事件落盘 + 按需读取」的思路）：几千个事件逐条发
+    # = 几千次 WS 帧往返 + 前端几千次 JSON.parse；攒成数组消息后往返降几十倍，
+    # 前端一次 parse 处理一批。单批超过 200KB 先发，避免单帧过大阻塞渲染
+    batch: list[str] = []
+    batch_bytes = 0
+
+    async def _flush_batch():
+        nonlocal batch, batch_bytes
+        if batch:
+            try:
+                await ws.send_text("[" + ",".join(batch) + "]")
+            except Exception:
+                raise ConnectionError
+            batch.clear()
+            batch_bytes = 0
+
+    def _feed(line: str):
+        """单行事件的全套处理：注入解释 / 调试暂停计时 / stdout 记忆 / 入批。"""
+        nonlocal batch_bytes
+        line = line.strip()
+        if not line:
+            return
+        send_stats["n"] += 1
+        if send_stats["n"] > MAX_EVENTS_PER_RUN:
+            send_stats["truncated"] = True
+            return
+        if ann and '"line"' in line and line.startswith('{"e": "line"'):
+            # 给真实执行的行事件补上"这一行在做什么"的说明
+            try:
+                o = json.loads(line)
+                a = ann.get((o.get("file"), o.get("line")))
+                if a:
+                    o["explain"] = a["explain"]
+                    if a.get("kind"):
+                        o["kind"] = a["kind"]
+                    line = json.dumps(o, ensure_ascii=False)
+            except Exception:
+                pass
+        # 调试暂停期间不该算进超时：人正在看代码，不是程序卡死
+        if clock is not None and '"e": "dbg"' in line:
+            try:
+                d = json.loads(line)
+                if d.get("kind") == "paused":
+                    clock["since"] = time.time()
+                elif d.get("kind") in ("resumed", "stopped", "timeout"):
+                    if clock.get("since"):
+                        clock["t0"] += time.time() - clock["since"]
+                        clock["since"] = 0.0
+            except Exception:
+                pass
+        # 记住最近的标准输出：有些命令行工具（argparse 定制版、lib2to3、自制 CLI）
+        # 把用法/失败原因打在 stdout 而不是 stderr，退出码非 0 时这是唯一线索
+        if line.startswith('{"e": "stdout"'):
+            try:
+                o = json.loads(line)
+                send_stats["tail"] = (send_stats.get("tail", "") + str(o.get("data") or ""))[-900:]
+            except Exception:
+                pass
+        batch.append(line)
+        batch_bytes += len(line)
+
     while True:
         await asyncio.sleep(0.035)
         chunk = ""
@@ -2395,59 +2460,30 @@ async def _pump(ws: WebSocket, proc, event_path: Path, send_stats: dict, ann: di
             lines = buf.split("\n")
             buf = lines.pop()
             for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                send_stats["n"] += 1
-                if send_stats["n"] > MAX_EVENTS_PER_RUN:
-                    send_stats["truncated"] = True
-                    continue
-                if ann and '"line"' in line and line.startswith('{"e": "line"'):
-                    # 给真实执行的行事件补上"这一行在做什么"的说明
+                _feed(line)
+                if batch_bytes >= 200_000:
                     try:
-                        o = json.loads(line)
-                        a = ann.get((o.get("file"), o.get("line")))
-                        if a:
-                            o["explain"] = a["explain"]
-                            if a.get("kind"):
-                                o["kind"] = a["kind"]
-                            line = json.dumps(o, ensure_ascii=False)
-                    except Exception:
-                        pass
-                # 调试暂停期间不该算进超时：人正在看代码，不是程序卡死
-                if clock is not None and '"e": "dbg"' in line:
-                    try:
-                        d = json.loads(line)
-                        if d.get("kind") == "paused":
-                            clock["since"] = time.time()
-                        elif d.get("kind") in ("resumed", "stopped", "timeout"):
-                            if clock.get("since"):
-                                clock["t0"] += time.time() - clock["since"]
-                                clock["since"] = 0.0
-                    except Exception:
-                        pass
-                # 记住最近的标准输出：有些命令行工具（argparse 定制版、lib2to3、自制 CLI）
-                # 把用法/失败原因打在 stdout 而不是 stderr，退出码非 0 时这是唯一线索
-                if line.startswith('{"e": "stdout"'):
-                    try:
-                        o = json.loads(line)
-                        send_stats["tail"] = (send_stats.get("tail", "") + str(o.get("data") or ""))[-900:]
-                    except Exception:
-                        pass
-                try:
-                    await ws.send_text(line)
-                except Exception:
-                    return
+                        await _flush_batch()
+                    except ConnectionError:
+                        return
         else:
             idle_rounds += 1
 
+        # 每轮收尾把没满 200KB 的尾批发出去：事件最多延迟一个 35ms 周期到达
+        try:
+            await _flush_batch()
+        except ConnectionError:
+            return
+
         if proc.returncode is not None and idle_rounds >= 2:
-            # 收尾：把剩余内容读完
+            # 收尾：剩余半行也走同一条攒批通道（以前是裸文本直发，前端解析不了）
             if buf.strip():
+                _feed(buf.strip())
+                buf = ""
                 try:
-                    await ws.send_text(buf.strip())
-                except Exception:
-                    pass
+                    await _flush_batch()
+                except ConnectionError:
+                    return
             return
 
 

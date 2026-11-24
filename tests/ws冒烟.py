@@ -25,8 +25,9 @@ async def run_file(path: str, extra_files=None, stub=True, guard=True, timeout=1
             except asyncio.TimeoutError:
                 break
             o = json.loads(raw)
-            evs.append(o)
-            if o.get("e") == "done":
+            items = o if isinstance(o, list) else [o]
+            evs.extend(items)
+            if items[-1].get("e") == "done":
                 break
     return evs
 

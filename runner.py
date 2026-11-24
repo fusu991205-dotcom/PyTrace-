@@ -21,6 +21,7 @@ from __future__ import annotations
 import ast
 import builtins
 import collections
+import io
 import json
 import os
 import sys
@@ -171,8 +172,9 @@ def _format_tb(exc, skip_file=None, _seen=None):
 def _safe_repr(v, limit: int = MAX_REPR) -> str:
     # 文件 / 套接字这类对象，默认 repr 是 <_io.TextIOWrapper name='data.txt' ...>，
     # 对新手是纯噪音。换成一句人话（保留文件名，这是有用的信息）。
+    # 注意：这里在热路径上（每一行每个变量都会调），io 必须模块级导入，
+    # 否则每次 repr 都走一遍 __import__ 钩子，事件流会被 import io 淹掉。
     try:
-        import io
         if isinstance(v, io.IOBase):
             nm = getattr(v, "name", None)
             mode = getattr(v, "mode", "")
@@ -645,8 +647,21 @@ class Debugger:
 
 
 class Tracer:
-    def __init__(self, target: str):
+    # 项目根下这些目录不是"用户写的代码"：依赖/产物/缓存，追进去只会淹掉调用链
+    _NON_USER_DIRS = frozenset({
+        "site-packages", "dist-packages", "node_modules", "__pycache__",
+        ".git", ".hg", ".svn", ".tox", ".mypy_cache", ".pytest_cache",
+        ".ruff_cache", ".venv", "venv", "env", "build", "dist",
+        ".eggs", "eggs", "htmlcov", ".idea", ".vscode",
+    })
+
+    def __init__(self, target: str, root: str = ""):
         self.target = os.path.abspath(target)
+        # 项目根：多文件项目的"用户代码"边界。
+        # 以前 is_user 只认入口文件本身，项目里 cli.py → service.py → model.py
+        # 这种真实分层在第 2 层就断（后面的帧全被当成三方库丢掉），
+        # 调用链/全景图/舞台变量对任何多文件项目都是空的。
+        self.root = os.path.abspath(root) if root else os.path.dirname(self.target)
         self.self_file = os.path.abspath(__file__)
         self.seq = 0
         self.frames: dict[int, dict] = {}
@@ -661,6 +676,7 @@ class Tracer:
         self.dbg = None                 # Debugger | None（--debug 时挂上）
         self._thr_names: dict = {}      # 线程 ident -> 「线程 N」（按出现顺序编号）
         self._task_names: dict = {}     # Task 对象 id -> 「task 协程名」
+        self.pending_exc: dict = {}     # 帧 id -> (行号, 异常名)：等"下一行"确认是否被 except 接住
 
     # -- 并发标注 -----------------------------------------------------------
     def _thread_label(self):
@@ -724,6 +740,27 @@ class Tracer:
         fn = filename.replace("\\", "/")
         return any(p in fn for p in SKIP_PREFIX)
 
+    def _is_user_file(self, filename: str) -> bool:
+        """这个文件算不算"用户自己的代码"（项目目录内、且不是依赖/产物）"""
+        fn = os.path.abspath(filename)
+        if fn == self.target:
+            return True
+        root = self.root
+        if not root:
+            return False
+        try:
+            if os.path.commonpath([fn, root]) != root:
+                return False
+        except ValueError:
+            return False            # Windows 跨盘符时 commonpath 会抛错
+        rel = os.path.relpath(fn, root).replace("\\", "/")
+        if not rel.endswith(".py"):
+            return False
+        for part in rel.split("/")[:-1]:
+            if part in self._NON_USER_DIRS:
+                return False
+        return True
+
     # -- 全局 trace -------------------------------------------------------
     def global_trace(self, frame, event, arg):
         if getattr(_busy, "on", False):
@@ -741,7 +778,7 @@ class Tracer:
         # 探针自身的帧一律不追踪（否则 emit / describe / import 钩子会互相触发）
         if os.path.abspath(filename) == self.self_file:
             return None
-        is_user = os.path.abspath(filename) == self.target
+        is_user = self._is_user_file(filename)
         if not is_user and self._skippable(filename):
             return None
 
@@ -806,6 +843,14 @@ class Tracer:
         def local_trace(fr, ev, a):
             try:
                 if ev == "line":
+                    # 这帧刚抛过异常、现在又在逐行执行 → 异常被本帧的 except 接住了。
+                    # 真实项目（faker 等）大量用 try/except 做控制流，不补这条提示，
+                    # 用户会以为"程序在这里中断了"，其实代码跑得好好的。
+                    pe = tracer.pending_exc.pop(id(fr), None)
+                    if pe and is_user_frame:
+                        emit({"e": "note", "type": "Handled",
+                              "msg": "刚才第 %d 行的 %s 被这段代码自己接住了（try/except 预期内"
+                                     "的分支），程序继续往下跑 —— 不是出错" % (pe[0], pe[1])})
                     if is_user_frame:
                         tracer.line_count += 1
                         # 长循环时自动降采样，保证事件量可控
@@ -832,6 +877,9 @@ class Tracer:
                         if tracer.dbg is not None:
                             tracer.dbg.hit(code.co_filename, fr.f_lineno, info["depth"])
                 elif ev == "return":
+                    # 注意：pending_exc 不在这里清 —— 异常帧会以 return 的方式把异常
+                    # 传给父帧（传播路径不走 return 事件），父帧若捕获它会继续逐行
+                    # 执行，那时才确认"被接住"。
                     tracer.frames.pop(id(fr), None)
                     tracer.snap.pop(sid, None)
                     dur = round((time.perf_counter() - info["start"]) * 1000.0, 3)
@@ -851,6 +899,8 @@ class Tracer:
                     if etype is StopIteration and _is_for_iter_stop(fr):
                         pass
                     else:
+                        tracer.pending_exc[id(fr)] = (fr.f_lineno,
+                                                      getattr(etype, "__name__", str(etype)))
                         emit({
                             "e": "exception",
                             "id": sid,
@@ -1420,6 +1470,14 @@ _stub_on = True
 def install_import_hook():
     def hooked(name, globals=None, locals=None, fromlist=(), level=0):
         global _import_depth, _import_suppressed
+        # 探针自身的 import 直接透传：describe/_safe_repr 在每一行每个变量上都会跑，
+        # 它们的 import 既不是用户代码行为，也不该挤占事件预算（曾经 8 万条事件里
+        # 7.7 万条是 import io）。
+        try:
+            if sys._getframe(1).f_code.co_filename == _SELF_FILE:
+                return _orig_import(name, globals, locals, fromlist, level)
+        except Exception:
+            pass
         # 嵌套导入（库内部触发）：静默完成，不上报 —— langchain 这类库一次
         # import 会引发上千次嵌套导入，逐条上报会瞬间淹没前端
         if _import_depth:
@@ -1453,7 +1511,8 @@ def install_import_hook():
                     f = sys._getframe(1)
                     caller_file = os.path.abspath(f.f_code.co_filename)
                     caller = f.f_code.co_name
-                    if caller_file == TARGET or not Tracer._skippable(caller_file):
+                    if caller_file != _SELF_FILE and (
+                            caller_file == TARGET or not Tracer._skippable(caller_file)):
                         caller = f.f_code.co_name if caller_file == TARGET else os.path.basename(caller_file)
                         emit({
                             "e": "import",
@@ -1483,6 +1542,7 @@ def install_import_hook():
 # 主流程
 # ---------------------------------------------------------------------------
 TARGET = ""
+_SELF_FILE = os.path.abspath(__file__)   # 探针自身：它的 import 既不上报也不占锁
 
 
 def _selftest() -> int:
@@ -1682,7 +1742,7 @@ def main() -> int:
             points = {}
             code_obj = compile(tree, target, "exec")
 
-    tracer = Tracer(target)
+    tracer = Tracer(target, pkg_root or os.path.dirname(target))
     tracer.module_names = _module_top_names(source)
     # 断点 / 单步：只有父进程给了控制通道才启用，否则相当于普通运行
     _ctl_path = os.environ.get("PYTRACE_CTL") or ""
