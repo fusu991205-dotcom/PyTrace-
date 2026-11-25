@@ -2275,14 +2275,48 @@ def _demo_match(code: str):
     return None
 
 
-APP_VERSION = "3.0.8"
+APP_VERSION = "3.0.9"
+
+
+def _ws_available() -> bool:
+    """WebSocket 链路自检：uvicorn 的 ws 协议实现 + websockets 库缺一不可。
+
+    打包环境装了裸 uvicorn（没有 [standard]）时，PyInstaller 对缺失的
+    hidden import 只警告不报错，exe 照样出炉 —— 症状是点「运行」永远
+    「请求没有送达执行器」，控制台刷 /ws/run 404（v3.0.8 用户实测）。
+    这里启动时就探测，让问题在第一屏就可见。"""
+    try:
+        import uvicorn.protocols.websockets.websockets_impl  # noqa: F401
+        import websockets  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+WS_OK = _ws_available()
 
 
 @app.get("/api/info")
 async def app_info():
     return {"demo": DEMO, "version": APP_VERSION,
             "default_timeout": DEMO_TIMEOUT if DEMO else 30.0,
-            "root": str(ROOT)}
+            "root": str(ROOT), "ws_ok": WS_OK}
+
+
+@app.websocket("/ws/ping")
+async def ws_ping(websocket: WebSocket):
+    """WebSocket 通道自检端点：握手成功即回 pong。打包自检与用户排障都用它。"""
+    await websocket.accept()
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), 5)
+        await websocket.send_text(json.dumps({"pong": True, "echo": raw[:60]}))
+    except Exception:
+        pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.get("/api/samples")
@@ -3107,6 +3141,12 @@ def main():
     if DEMO:
         print("  模式: 在线演示（仅内置示例，禁止任意代码执行）")
     print(f"  运行目录: {RUNTIME}")
+    if not WS_OK:
+        # 打包缺 WebSocket 库（裸 uvicorn）时第一屏就说清楚，不给"点了没反应"的体验
+        print("  " + "!" * 62)
+        print("  !! 警告：本环境缺少 WebSocket 库，点「运行」会一直连接失败！")
+        print("  !! 修复：重新打包时使用 pip install \"uvicorn[standard]\"（见 build.yml）")
+        print("  " + "!" * 62)
     print(f"  按 Ctrl+C 退出\n")
 
     if args.desktop:

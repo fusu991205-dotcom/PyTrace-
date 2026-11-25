@@ -3552,6 +3552,13 @@ async function detectDemo() {
       const vc = $('#verChip');
       if (vc) { vc.textContent = 'v' + d.version; vc.hidden = false; }
     }
+    // WebSocket 链路自检：打包缺 ws 库时运行永远失败，启动就给常驻红条
+    if (d.ws_ok === false) {
+      const bar = document.createElement('div');
+      bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#8f1d1d;color:#fff;padding:8px 16px;font-size:13px;';
+      bar.textContent = '⚠ 运行功能不可用：这个 PyTrace 打包时缺少 WebSocket 库（/ws/run 404）。请用新的 build.yml 重新打包：pip install "uvicorn[standard]"';
+      document.body.appendChild(bar);
+    }
     if (!d.demo) return;
     S.demo = true;
     document.body.classList.add('demo');
