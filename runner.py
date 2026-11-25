@@ -1381,20 +1381,15 @@ def _framework_candidates(source: str):
                 continue
             methods = []
             for sub in node.body:
+                # 列名只滤私有：协议类的约定方法（哪怕叫 run）要完整列出；
+                # 「是否危险 / 是否可无参调用」在演示阶段再判
                 if not isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
-                if sub.name.startswith("_") or sub.name in _RISKY_WORDS:
-                    continue
-                a = sub.args
-                # 绑定调用时 self 不用传：其余位置参数全有默认值、关键字参数
-                # 全有默认值，才算"可以无参演示"
-                if len(a.defaults) < len(a.args) - 1:
-                    continue
-                if any(d is None for d in a.kw_defaults):
+                if sub.name.startswith("_"):
                     continue
                 methods.append(sub.name)
             if methods:
-                demo_classes.append((node.name, methods[:3]))
+                demo_classes.append((node.name, methods[:4]))
     names = (with_deco + plain)[:6]          # 最多演示 6 个，防刷屏
     return names, demo_classes[:2], (bool(names or demo_classes) and not has_entry)
 
@@ -1522,19 +1517,13 @@ def _framework_demo(g, source, tracer):
                           "msg": "脚本主动调用 sys.exit(%s) 结束（非 0 退出码 = 按约定失败）" % (exc.code,),
                           "line": 0})
         elif exc is not None:                     # 演示调用里的异常照常可视化
-            tb_txt = "".join(_format_tb(exc, os.path.abspath(__file__)))
-            emit({
-                "e": "error", "type": type(exc).__name__,
-                "msg": _safe_repr(exc, 400),
-                "traceback": tb_txt[-4000:],
-            })
-            tee = getattr(sys.stderr, "tee", None)
-            if tee is not None:
-                try:
-                    tee.write(tb_txt)
-                    tee.flush()
-                except Exception:
-                    pass
+            # 用 note 而不是 error：演示是 PyTrace 额外赠送的执行，它抛异常
+            # 不代表「你的程序失败」（QaHarness 实测：构造失败把舞台染红，
+            # 用户以为程序挂了）。异常本身是有价值的教学信息，提示即可。
+            emit({"e": "note", "type": "Framework",
+                  "msg": "演示调用 %s() 抛出 %s：%s —— 常见原因是它需要真实参数"
+                         "或依赖真实环境，演示入参只是占位；这恰好暴露了它的真实入参要求"
+                         % (n, type(exc).__name__, _safe_repr(exc, 160))})
         called += 1
 
     # 类演示：可无参构造的公有类真实构造一次，再挑它的无参公有方法各调用
@@ -1542,6 +1531,17 @@ def _framework_demo(g, source, tracer):
     for cname, methods in demo_classes:
         cls = g.get(cname)
         if cls is None or not callable(cls):
+            continue
+        # typing.Protocol 协议类（_is_protocol=True）：只定义接口、不能实例化
+        # （QaHarness() → TypeError: Protocols cannot be instantiated），方法体
+        # 也都是 ... 占位 —— 实测构造必失败还会把舞台染成"运行失败"。
+        # 改为如实讲解协议本身：列出它约定的方法签名，指路"找实现类"。
+        if getattr(cls, "_is_protocol", False):
+            emit({"e": "note", "type": "Framework",
+                  "msg": "%s 是接口协议类（typing.Protocol）：它只约定「能做什么」"
+                         "（%s），方法体是占位不写实现，也不能实例化 —— 真正的"
+                         "执行逻辑在实现它的类里，从引用它的文件能找到"
+                         % (cname, " / ".join(methods[:4]) or "无方法")})
             continue
         try:
             _inspect.signature(cls)          # __init__ 不可解析就不碰
@@ -1560,23 +1560,44 @@ def _framework_demo(g, source, tracer):
               "msg": "演示构造 %s() —— 全字段有默认值，构造无副作用风险，真实执行" % cname})
         _obj, exc = _demo_run(tracer, cls)
         if exc is not None:
-            tb_txt = "".join(_format_tb(exc, os.path.abspath(__file__)))
-            emit({"e": "error", "type": type(exc).__name__,
-                  "msg": _safe_repr(exc, 400), "traceback": tb_txt[-4000:]})
+            emit({"e": "note", "type": "Framework",
+                  "msg": "演示构造 %s() 抛出 %s：%s —— 该类需要真实参数或依赖真实环境，"
+                         "演示不凭空编造" % (cname, type(exc).__name__, _safe_repr(exc, 160))})
         called += 1
         if _obj is None:
             continue
-        for m in methods[:2]:
+        for m in methods[:3]:
             meth = getattr(_obj, m, None)
             if meth is None or not callable(meth):
+                continue
+            if m in _RISKY_WORDS:
+                emit({"e": "note", "type": "Framework",
+                      "msg": "%s.%s() 名字提示它可能有外部副作用（写盘/网络/子进程等），"
+                             "演示不自动调用" % (cname, m)})
+                continue
+            # 全默认值（绑定后无必填参数）才真实调用；需要参数的只如实列出
+            try:
+                sig = _inspect.signature(meth)
+                req = [p.name for p in sig.parameters.values()
+                       if p.default is _inspect.Parameter.empty
+                       and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+                kw_req = any(p.default is _inspect.Parameter.empty and p.kind == p.KEYWORD_ONLY
+                             for p in sig.parameters.values())
+                if req or kw_req:
+                    emit({"e": "note", "type": "Framework",
+                          "msg": "%s.%s(需要参数：%s) 不自动调用 —— 演示不凭空编造参数"
+                                 % (cname, m, "、".join(req[:4]) or "关键字参数")})
+                    continue
+            except (ValueError, TypeError):
                 continue
             emit({"e": "note", "type": "Framework",
                   "msg": "演示调用 实例.%s() —— 执行路径真实，无参（全默认值）" % m})
             _ret, exc = _demo_run(tracer, meth)
             if exc is not None:
-                tb_txt = "".join(_format_tb(exc, os.path.abspath(__file__)))
-                emit({"e": "error", "type": type(exc).__name__,
-                      "msg": _safe_repr(exc, 400), "traceback": tb_txt[-4000:]})
+                emit({"e": "note", "type": "Framework",
+                      "msg": "演示调用 实例.%s() 抛出 %s：%s —— 方法依赖实例的"
+                             "真实内部状态，演示实例是刚构造的空壳"
+                             % (m, type(exc).__name__, _safe_repr(exc, 160))})
             called += 1
 
     if called:
