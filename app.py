@@ -3166,10 +3166,15 @@ def main():
     port = int(env_port) if env_port else free_port(args.port)
     url = f"http://{args.host}:{port}"
     print(BANNER)
-    # 首屏自证：版本号 + WebSocket 状态。此前黑窗口没有版本标识，
+    # 首屏自证：版本号 + 构建时间 + WebSocket 状态。此前黑窗口没有版本标识，
     # 用户反复拿旧 exe 排查新问题、一轮轮对着同样的 404 日志发问 ——
-    # "我手里这个 exe 是哪一版"必须是第一眼就能回答的问题。
-    print(f"  版本: v{APP_VERSION}    WebSocket: {'正常' if WS_OK else '缺失!'}")
+    # "我手里这个 exe 是哪一版、哪次构建"必须是第一眼就能回答的问题。
+    try:
+        from build_info import BUILD_INFO as _BI
+    except Exception:                        # 缺文件（只拷了部分源码）也不影响启动
+        _BI = {}
+    _built = ("  构建 " + _BI["built_at"] + ((" / " + _BI["commit"]) if _BI.get("commit") else "")) if _BI.get("built_at") else ""
+    print(f"  版本: v{APP_VERSION}    WebSocket: {'正常' if WS_OK else '缺失!'}{_built}")
     print(f"  服务地址: {url}")
     if DEMO:
         print("  模式: 在线演示（仅内置示例，禁止任意代码执行）")

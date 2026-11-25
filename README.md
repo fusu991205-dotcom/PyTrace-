@@ -159,6 +159,7 @@ python app.py --desktop
 # 方式二：一键打包成单文件可执行程序（推荐，v2.5.0 起官方支持）
 # Windows：双击 build_windows.bat，产物 dist\PyTrace.exe
 # Linux / macOS：
+python -m pip install -r requirements.txt     # uvicorn 必须带 [standard]，见下
 python -m pip install pyinstaller
 python -m PyInstaller --clean --noconfirm pytrace.spec   # 产物 dist/PyTrace
 ```
@@ -170,7 +171,12 @@ python -m PyInstaller --clean --noconfirm pytrace.spec   # 产物 dist/PyTrace
 - `runner.py / guard.py / instrument.py / envcheck.py / interp.py` 以**源码**形式随包，
   由探测到的用户 Python 执行；找不到解释器时界面会给出明确指引而不是一条 spawn 报错；
 - 运行历史（`runtime/`）落在 **exe 旁边的目录**（打包内的临时解压目录退出即清空，不能存东西）；
-- 杀毒软件可能对"陌生单文件 exe"报警：把 exe 所在目录加入白名单即可（运行历史也在那里）。
+- 杀毒软件可能对"陌生单文件 exe"报警：把 exe 所在目录加入白名单即可（运行历史也在那里）；
+- **⚠️ 打包依赖必须是 `uvicorn[standard]`**（requirements.txt 已写对）。裸 uvicorn 没有附带
+  WebSocket 实现库，打出的 exe 点「运行」永远 404，而 PyInstaller 对缺失模块只警告不报错、
+  坏 exe 会静默出厂。v3.0.10 起 `build_windows.bat` 会先真实检查 `import websockets`、
+  缺了自动补装，并在打包完成后启动 exe 做握手级自检（/api/info 的 ws_ok + /ws/ping 真实握手），
+  自检不过就报错并拒绝交付。
 
 ## 🔒 安全与限制
 
@@ -202,6 +208,19 @@ PyTrace/
 ├── start.sh / start_windows.bat
 └── README.md
 ```
+
+## 🔭 参考的开源同类项目
+
+| 项目 | 借鉴点 |
+|---|---|
+| [VizTracer](https://github.com/gaogaotiantian/viztracer) | 全量函数追踪 + 时间轴瀑布图（本项目的调用树/瀑布图思路来源） |
+| [Birdseye](https://github.com/alexmojaki/birdseye) | 事后查看每次调用的入参/返回值/表达式 |
+| [Heartrate](https://github.com/alexmojaki/heartrate) | 实时逐行执行可视化 + 行点击查看变量 |
+| [Python Tutor](https://github.com/pgbovine/OnlinePythonTutor) | 逐步回放式教学可视化 |
+| [snoop](https://github.com/alexmojaki/snoop) / [PySnooper](https://github.com/cool-RR/PySnooper) | 函数入参、局部变量、返回值的行级打印 |
+| [pyinstrument](https://github.com/joerick/pyinstrument) / [memray](https://github.com/bloomberg/memray) | 调用聚合统计与时间占比条形图 |
+
+PyTrace 把它们的共同能力（追踪 → 聚合 → 可视化 → 回放）浓缩成了一个零配置的本地小工具。
 
 ## ❓ FAQ
 
