@@ -697,7 +697,13 @@ class Tracer:
         if _asyncio is None:
             return None
         try:
-            task = _asyncio.current_task()
+            # 先查 thread-local 的 running loop（一次指针读，几乎零开销）：
+            # 同步代码每行都走到这里，没有运行中的事件循环就直接返回，
+            # 不再拿 _CONC_LOCK + 调 current_task —— 纯同步项目的事件流更轻
+            loop = _asyncio.events._get_running_loop()
+            if loop is None:
+                return None
+            task = _asyncio.current_task(loop)
             if task is None:
                 return None
         except Exception:

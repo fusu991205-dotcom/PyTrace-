@@ -64,8 +64,34 @@ def data_root() -> Path:
 ROOT = resource_root()
 DATA_ROOT = data_root()
 WEB = ROOT / "web"
-RUNNER = ROOT / "runner.py"
-ENVCHECK = ROOT / "envcheck.py"
+
+
+def _stage_probe_scripts() -> Path:
+    """打包版把探针脚本从 _MEIPASS 复制到 exe 旁的 probe/ 目录，再交给用户解释器执行。
+
+    为什么不直接用 _MEIPASS 里的脚本：Windows Defender 等杀软对 Temp 目录里的
+    PyInstaller 解压目录（_MEIxxxx）重点盯防，"陌生解释器执行 Temp 下的 .py"
+    会被实时防护拦下 —— 表现就是 OSError 000005（拒绝访问）、子进程 exit(1)
+    （v3.0.10 用户实测）。exe 旁目录只要被信任过一次就稳定可用，且每次启动
+    都重新复制，保证探针脚本与 exe 版本永远一致。
+    源码运行时无此问题，直接用原目录；复制失败则退回原路径（可用性优先）。"""
+    if not getattr(sys, "frozen", False):
+        return ROOT
+    stage = DATA_ROOT / "probe"
+    try:
+        stage.mkdir(exist_ok=True)
+        for _name in ("runner.py", "guard.py", "instrument.py", "envcheck.py"):
+            _src = ROOT / _name
+            if _src.exists():
+                shutil.copy2(_src, stage / _name)
+    except Exception:
+        return ROOT
+    return stage
+
+
+_PROBE_DIR = _stage_probe_scripts()
+RUNNER = _PROBE_DIR / "runner.py"
+ENVCHECK = _PROBE_DIR / "envcheck.py"
 INTERP = ROOT / "interp.py"
 SAMPLES = ROOT / "samples"
 # 多文件示例项目：在线演示版没有「打开文件夹」，用它在网页上也能展示
@@ -2275,7 +2301,7 @@ def _demo_match(code: str):
     return None
 
 
-APP_VERSION = "3.0.10"
+APP_VERSION = "3.0.13"
 
 
 def _ws_available() -> bool:
@@ -2300,7 +2326,10 @@ WS_OK = _ws_available()
 async def app_info():
     return {"demo": DEMO, "version": APP_VERSION,
             "default_timeout": DEMO_TIMEOUT if DEMO else 30.0,
-            "root": str(ROOT), "ws_ok": WS_OK}
+            "root": str(ROOT), "ws_ok": WS_OK,
+            # 前端据此给"对身份的修法"：exe 用户不该被要求 pip install，
+            # 源码用户才需要装依赖 —— 同一句提示对不同用户必然有一半是废话
+            "frozen": bool(getattr(sys, "frozen", False))}
 
 
 @app.websocket("/ws/ping")
@@ -3137,6 +3166,10 @@ def main():
     port = int(env_port) if env_port else free_port(args.port)
     url = f"http://{args.host}:{port}"
     print(BANNER)
+    # 首屏自证：版本号 + WebSocket 状态。此前黑窗口没有版本标识，
+    # 用户反复拿旧 exe 排查新问题、一轮轮对着同样的 404 日志发问 ——
+    # "我手里这个 exe 是哪一版"必须是第一眼就能回答的问题。
+    print(f"  版本: v{APP_VERSION}    WebSocket: {'正常' if WS_OK else '缺失!'}")
     print(f"  服务地址: {url}")
     if DEMO:
         print("  模式: 在线演示（仅内置示例，禁止任意代码执行）")
@@ -3144,8 +3177,8 @@ def main():
     if not WS_OK:
         # 打包缺 WebSocket 库（裸 uvicorn）时第一屏就说清楚，不给"点了没反应"的体验
         print("  " + "!" * 62)
-        print("  !! 警告：本环境缺少 WebSocket 库，点「运行」会一直连接失败！")
-        print("  !! 修复：重新打包时使用 pip install \"uvicorn[standard]\"（见 build.yml）")
+        print("  !! 这是一个无法运行的坏包（缺 WebSocket 库），请更换最新版 exe！")
+        print("  !! exe 用户：重新下载最新版 PyTrace.exe；源码用户：pip install \"uvicorn[standard]\"")
         print("  " + "!" * 62)
     print(f"  按 Ctrl+C 退出\n")
 

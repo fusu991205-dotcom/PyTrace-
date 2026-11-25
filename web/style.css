@@ -51,6 +51,32 @@ button,select,input{font-family:inherit;font-size:12px;color:inherit}
   display:grid;
   grid-template-rows:54px minmax(0,1fr) 46px;
 }
+/* WebSocket 告警条出现时，多出一行 auto：整页内容下移，顶栏按钮永不被遮挡。
+   旧实现用 position:fixed 浮在最上层 —— 直接把 54px 顶栏压住，按钮点不到，
+   而且只要 ws 一直不可用，它就一直挡（用户实测反馈）。 */
+#app.has-wsbar{
+  grid-template-rows:auto 54px minmax(0,1fr) 46px;
+}
+
+/* ============================ WebSocket 告警条 ============================ */
+.wsbar{
+  display:flex;align-items:center;gap:10px;
+  padding:7px 16px;
+  background:#8f1d1d;color:#fff;font-size:13px;line-height:1.5;
+  border-bottom:1px solid #6f1414;
+}
+.wsbar[hidden]{display:none}
+.wsbar-ico{flex:0 0 auto;font-size:14px}
+.wsbar-text{flex:1;min-width:0}
+.wsbar-toggle{
+  flex:0 0 auto;background:rgba(255,255,255,.16);color:#fff;
+  border:1px solid rgba(255,255,255,.35);border-radius:6px;
+  padding:2px 10px;font-size:12px;cursor:pointer;
+}
+.wsbar-toggle:hover{background:rgba(255,255,255,.28)}
+/* 收起态：只留一行细条（图标 + 一句话），把屏幕还给代码区；点「展开」恢复详情 */
+.wsbar.collapsed{padding:3px 16px;font-size:12px}
+.wsbar.collapsed .wsbar-detail{display:none}
 
 /* ============================ 顶栏 ============================ */
 .topbar{

@@ -3552,12 +3552,28 @@ async function detectDemo() {
       const vc = $('#verChip');
       if (vc) { vc.textContent = 'v' + d.version; vc.hidden = false; }
     }
-    // WebSocket 链路自检：打包缺 ws 库时运行永远失败，启动就给常驻红条
+    // WebSocket 链路自检：打包缺 ws 库时运行永远失败，启动就给常驻告警条。
+    // 注意：告警条插在 #app 布局的第一行（has-wsbar 改 grid 行数），不是
+    // fixed 浮层 —— 浮层会压住顶栏按钮，ws 一直坏就一辈子点不到按钮。
     if (d.ws_ok === false) {
-      const bar = document.createElement('div');
-      bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#8f1d1d;color:#fff;padding:8px 16px;font-size:13px;';
-      bar.textContent = '⚠ 运行功能不可用：这个 PyTrace 打包时缺少 WebSocket 库（/ws/run 404）。请用新的 build.yml 重新打包：pip install "uvicorn[standard]"';
-      document.body.appendChild(bar);
+      const bar = $('#wsBar'), app = $('#app');
+      if (bar && app) {
+        const detail = $('#wsBarDetail');
+        if (detail) {
+          detail.textContent = d.frozen
+            ? '这个 exe 打包时缺 WebSocket 库（/ws/run 404）。请下载最新版 PyTrace.exe（v3.0.11 起已修复）；若已是最新版仍提示，检查杀毒软件是否拦了 exe 所在目录。'
+            : '当前 Python 环境缺少 WebSocket 库。请执行 pip install "uvicorn[standard]" 后重启 PyTrace。';
+        }
+        bar.hidden = false;
+        app.classList.add('has-wsbar');
+        const tg = $('#wsBarToggle');
+        if (tg) {
+          tg.onclick = () => {
+            bar.classList.toggle('collapsed');
+            tg.textContent = bar.classList.contains('collapsed') ? '展开' : '收起';
+          };
+        }
+      }
     }
     if (!d.demo) return;
     S.demo = true;

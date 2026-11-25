@@ -11,6 +11,17 @@
 <div class="scan-beam" id="scanBeam"></div>
 <div id="app">
 
+  <!-- WebSocket 链路告警：作为 #app 布局的第一行存在（不是 fixed 浮层）。
+       出现时整页内容整体下移，永远不会遮住顶栏按钮。 -->
+  <div class="wsbar" id="wsBar" hidden>
+    <span class="wsbar-ico">⚠</span>
+    <span class="wsbar-text">
+      <b>运行功能不可用</b>：当前 PyTrace 缺少 WebSocket 库，点「运行」不会出结果。
+      <span class="wsbar-detail" id="wsBarDetail"></span>
+    </span>
+    <button class="wsbar-toggle" id="wsBarToggle" type="button">收起</button>
+  </div>
+
   <!-- ================= 顶栏 ================= -->
   <header class="topbar">
     <div class="brand">
