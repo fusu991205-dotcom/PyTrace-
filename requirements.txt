@@ -1,6 +1,10 @@
 # PyTrace 运行依赖（都很轻量）
 fastapi>=0.100
-uvicorn>=0.23
+
+# 必须带 [standard]：它才附带 websockets 库（WebSocket 运行实现）。
+# 裸 uvicorn 打包出来的 exe 点「运行」永远 404（/ws/run 握手被拒），
+# 且 PyInstaller 对缺失的动态 import 只警告不报错 —— 坏 exe 会静默出厂。
+uvicorn[standard]>=0.23
 
 # 可选：想要"原生窗口"而不是浏览器，额外安装 pywebview
 # pywebview>=4.4

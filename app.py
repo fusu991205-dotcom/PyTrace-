@@ -2275,7 +2275,7 @@ def _demo_match(code: str):
     return None
 
 
-APP_VERSION = "3.0.9"
+APP_VERSION = "3.0.10"
 
 
 def _ws_available() -> bool:
