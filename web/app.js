@@ -1773,6 +1773,7 @@ function resetDerived() {
   S.spans = new Map(); S.order = []; S.roots = [];
   S.imports = []; S.importAgg = new Map();
   S.stdout = ''; S.stderr = ''; S.notes = []; S.errors = []; S.handledNotes = [];
+  S.truncated = false;      // 本次运行是否撞过事件上限（下次运行必须重置）
   S.curLine = 0; S.lineOf = new Map(); S.stack = [];
   S.span = 1; S.endMs = 0; S.stats = null; S.wall = 0;
   S.sel = null; S.flowKey = '';
@@ -1923,6 +1924,17 @@ function applyEvent(ev) {
       if (ev.stats && ev.stats.imports_folded > 0) {
         S.notes.push(`库内部嵌套导入已聚合：折叠了 ${ev.stats.imports_folded} 次第三方库内部的 import`);
       }
+      if (ev.truncated && !S.truncated) {
+        S.truncated = true;
+        S.notes.push('本次运行的逐行明细达到上限被截断，程序本身完整跑完，结果与输出不受影响');
+      }
+      break;
+    case 'trunc':
+      // 事件预算用尽：明细不再逐行记录，但脚本还在正常跑完。
+      // 以前这里没有任何提示，用户只看到"事件停在某处 + 运行超时"，无从判断。
+      S.truncated = true;
+      S.notes.push(ev.msg || '事件数量已达上限，之后的明细不再逐行记录');
+      toast(ev.msg || '事件数量已达上限，明细已停止记录（脚本仍在跑）', 'warn');
       break;
   }
 }
@@ -2630,7 +2642,7 @@ async function run() {
   S.wsAccepted = false;
   S.wsEventCount = 0;
   ws.onopen = () => {
-    const timeout = Math.max(1, Math.min(120, parseInt($('#timeoutInput').value || '30', 10)));
+    const timeout = Math.max(1, Math.min(600, parseInt($('#timeoutInput').value || '30', 10)));
     try {
       ws.send(JSON.stringify(buildRunPayload(S.code, S.filename, timeout, false)));
     } catch (err) {
@@ -4160,6 +4172,7 @@ const GV = {
   sel: '', W: 0, H: 0,
   running: false, stop: false,
   nodes: [], edges: [],
+  edgeMode: 'auto',     // 连线模式：auto=只画活链路+启动边（默认） | all=全部静态依赖边
 };
 const GV_NW = 212, GV_NH = 46, GV_GAPY = 12, GV_PAD = 22, GV_TOP = 56, GV_MAX_COL = 11;
 
@@ -5326,8 +5339,21 @@ function renderGraph(keepView) {
     s += `<line class="gv-col-b" x1="${col.x - 8}" y1="${GV_TOP - 30}" x2="${col.x - 8}" y2="${GV_TOP + Math.max(col.nodes.length, 1) * (GV_NH + GV_GAPY) - GV_GAPY}"/>`;
   }
 
-  // 边（先画，压在节点下面）：两端都真跑过 → 高亮成「活链路」
-  for (const p of model.paths) {
+  // 边（先画，压在节点下面）：两端都真跑过 → 高亮成「活链路」。
+  // 连线模式（GV.edgeMode）：
+  //   auto（默认）—— 大项目进来不被几百条静态依赖线糊一脸：只画「活链路」
+  //   （两端都真实跑过的边）和 spawn 边（谁以子进程方式启动谁，数量少、语义最强）。
+  //   静态 import/call 边仍然参与布局（层级计算要用），只是不渲染。
+  //   all —— 旧版行为：全部静态依赖边都画（点工具栏「连线·全部」切换）。
+  let drawnPaths = model.paths;
+  if (GV.edgeMode === 'auto') {
+    drawnPaths = model.paths.filter((p) => {
+      if (p.kind === 'spawn') return true;
+      const ca = covOf(p.from), cb = covOf(p.to);
+      return ranOf(ca) && ranOf(cb);
+    });
+  }
+  for (const p of drawnPaths) {
     const ca = covOf(p.from), cb = covOf(p.to);
     const hot = ranOf(ca) && ranOf(cb);
     const arrow = hot ? 'url(#gvArrowHot)' : 'url(#gvArrow)';
@@ -5640,6 +5666,17 @@ function runEntryOnce(name, timeout) {
         res.errMsg = String(ev.msg || '');
         res.errType = String(ev.type || '');
       }
+      // 事件预算用尽：批量跑里以前这条被当成普通事件计数后丢弃，
+      // 用户只会看到"跑通了但看不到细节"，完全不知道发生了什么。
+      if (ev.e === 'trunc') {
+        res.truncated = true;
+        const msg = String(ev.msg || '事件数量达到上限，逐行明细已截断（脚本仍完整跑完）');
+        if (!S.truncated) {
+          S.truncated = true;
+          S.notes.push(msg);
+          toast(msg, 'warn');
+        }
+      }
     };
     // 攒批后端会发「数组」消息；单条消息也兼容（新旧后端通用）
     ws.onmessage = (e) => {
@@ -5663,6 +5700,7 @@ async function runAllEntries() {
     toast('这个项目没有识别到启动入口（没有 __main__ 块，顶层也没有直接执行的语句）—— 点节点逐个阅读即可', 'warn');
     return;
   }
+  S.truncated = false;      // 批量跑也是一轮独立的运行
   const entries = all.slice(0, limit);
   S.coverage = S.coverage || new Map();
   GV.running = true; GV.stop = false;
@@ -5670,7 +5708,10 @@ async function runAllEntries() {
   if (btn) btn.hidden = true;
   if (stopBtn) { stopBtn.hidden = false; stopBtn.textContent = '停止'; }
   if (prog) prog.hidden = false;
-  const timeout = Math.min(25, Math.max(5, parseInt($('#timeoutInput').value || '30', 10)));
+  // 超时跟随用户设置（上限 120s），不再硬钳 25s —— 网络项目/重 import 项目
+  // 单个入口 25s 跑不完（用户实测：调超时上限到 120s 依然超时，就是这个钳制）。
+  // 正常脚本 done 提前返回，超时值只是兜底，放宽不会拖慢跑得快的入口。
+  const timeout = Math.max(5, parseInt($('#timeoutInput').value || '30', 10));
   // 按「为什么没跑通」分类计数：超时 / 需参数 属于脚本本身的性质，不算项目有问题
   const tally = {};
   const bump = (k) => { tally[k] = (tally[k] || 0) + 1; };
@@ -5722,14 +5763,16 @@ async function runAllEntries() {
 
 async function runSingleFromGraph(name) {
   if (GV.running) return;
-  const timeout = Math.max(1, Math.min(120, parseInt($('#timeoutInput').value || '30', 10)));
+  const timeout = Math.max(1, Math.min(600, parseInt($('#timeoutInput').value || '30', 10)));
   GV.running = true;
+  S.truncated = false;      // 每次运行独立判断，不被上一轮的截断状态盖住
   toast(`正在运行 ${name.split('/').pop()} …`, '');
   const r = await runEntryOnce(name, timeout);
   GV.running = false;
   S.coverage = S.coverage || new Map();
   S.coverage.set(name, { events: r.events, ok: r.ok, ms: Math.round(r.ms), err: r.err,
-      errKind: r.errKind || '', errHint: r.errHint || '', errText: r.errText || '' });
+      errKind: r.errKind || '', errHint: r.errHint || '', errText: r.errText || '',
+      truncated: !!r.truncated });
   for (const bn of r.files) {
     const pn = resolveProjName(bn);
     if (pn && pn !== name && !S.coverage.get(pn)) S.coverage.set(pn, { events: 0, ok: true, via: name, ms: 0, err: '' });
@@ -5787,6 +5830,14 @@ function bindGraph() {
   if (trm) trm.onclick = () => {
     // undefined = 自动（大项目默认精简）；点一下强制开，再点强制关
     GV.trim = (GV.trim === undefined) ? true : !GV.trim;
+    renderGraph();
+  };
+  const egb = $('#gvEdges');
+  if (egb) egb.onclick = () => {
+    // 连线模式切换：自动（默认，只画活链路+启动边）↔ 全部（所有静态依赖边）
+    GV.edgeMode = (GV.edgeMode === 'auto') ? 'all' : 'auto';
+    egb.classList.toggle('on', GV.edgeMode === 'auto');
+    egb.textContent = GV.edgeMode === 'auto' ? '连线·自动' : '连线·全部';
     renderGraph();
   };
   const gex = $('#gvExport'); if (gex) gex.onclick = () => exportReport(gex);

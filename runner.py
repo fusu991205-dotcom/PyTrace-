@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import ast
+import atexit
 import builtins
 import collections
 import io
@@ -49,6 +50,7 @@ except Exception:                       # noqa: BLE001
 # 采集上限，防止死循环程序把浏览器打爆
 # ---------------------------------------------------------------------------
 MAX_EVENTS = 80000          # 事件总数上限
+MAX_STDOUT = 3000           # 输出行独立预算：明细可截断，程序打印的内容不下狠手
 MAX_REPR = 220              # 单个值的预览字符数
 MAX_CHILDREN = 24           # 单个容器展开的元素数
 MAX_DEPTH = 3               # repr 展开深度
@@ -78,30 +80,77 @@ _state = {"count": 0, "truncated": False, "dropped": 0}
 _t0 = time.perf_counter()
 _out = None
 
+# --- 事件攒批 ---
+# 旧实现 _out 是行缓冲（buffering=1），每条事件一次 write+flush 系统调用：
+# 20 万次循环 = 20 万次 syscall，实测比不插桩慢 175 倍，用户跑任何
+# 攒批写出的尝试已回退：实测在本地盘上只省 13%（真正的大头是 _safe_repr
+# 的标量快通道，见下），却引入三处丢事件风险（selftest 读不到、close 前漏刷、
+# 超时被杀时尾部丢失）。零收益的复杂度就是负债。
+
+# 终止类事件：事件预算用尽也必须写出去。少了 end，前端就永远等不到收尾。
+_TAIL_EVENTS = frozenset(("end", "error", "summary", "done", "trunc"))
+
 
 def now_ms() -> float:
     return round((time.perf_counter() - _t0) * 1000.0, 3)
 
 
+def flush_events() -> None:
+    """把文件缓冲刷到磁盘。保留此函数：进程退出/收尾时要确保事件都已落盘。"""
+    with _emit_lock:
+        try:
+            _out.flush()
+        except Exception:
+            pass
+
+
 def emit(obj: dict) -> None:
-    """写入一条事件。带重入保护：describe() 里若触发用户代码，不会造成无限递归。"""
-    if getattr(_busy, "on", False):
+    """写入一条事件。带重入保护：describe() 里若触发用户代码，不会造成无限递归。
+
+    预算用尽（MAX_EVENTS）时**不能无声静默**：截断以前连 end 事件都写不进去，
+    前端等不到结束信号就一直空转到超时 —— 脚本早就跑完了，用户看到的是
+    "运行超时"。所以终止类事件必须永远放行，并补一条 trunc 说明原因。
+    """
+    busy = _busy
+    if getattr(busy, "on", False):
         return
-    if _state["count"] >= MAX_EVENTS:
-        _state["truncated"] = True
-        return
-    _busy.on = True
+    kind = obj.get("e")
+    if kind == "stdout" and not obj.get("sampled"):
+        # 输出是独立预算：逐行明细可以截断，但"程序打印了什么"不能丢。
+        # 之前 stdout 和明细共用 MAX_EVENTS，脚本末尾那句 print 恰好掉在
+        # 截断点之后就被吞了 —— 程序跑完却一个字都没有，最难向用户解释。
+        _state["stdout"] = _state.get("stdout", 0) + 1
+        n = _state["stdout"]
+        if n > MAX_STDOUT:
+            if (n - MAX_STDOUT) % 50:
+                return
+            obj["sampled"] = 1        # 超出部分每 50 行留 1 行，并做标记
+    if _state["count"] >= MAX_EVENTS and kind not in _TAIL_EVENTS:
+        if kind == "stdout":
+            pass                      # 上面已按 stdout 自己的预算处理
+        elif _state["truncated"]:
+            return
+        else:
+            _state["truncated"] = True
+            obj = {"e": "trunc", "max": MAX_EVENTS,
+                   "msg": "已记录 %d 条事件，达到上限；之后的明细不再逐行记录（脚本仍会跑完，结果和输出不受影响）" % MAX_EVENTS}
+    busy.on = True
     try:
+        if _state["truncated"] and kind in _TAIL_EVENTS:
+            obj.setdefault("truncated", True)   # 终止事件顺手带上"本次被截断过"
+        obj["t"] = round((time.perf_counter() - _t0) * 1000.0, 3)
+        text = json.dumps(obj, ensure_ascii=False, default=str) + "\n"
         with _emit_lock:
             _state["count"] += 1
-            obj["t"] = now_ms()
             try:
-                _out.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
+                _out.write(text)
                 _out.flush()
             except Exception:
                 pass
+    except Exception:
+        pass
     finally:
-        _busy.on = False
+        busy.on = False
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +219,14 @@ def _format_tb(exc, skip_file=None, _seen=None):
 
 
 def _safe_repr(v, limit: int = MAX_REPR) -> str:
+    # 热路径：每一行、每个变量、每个子表达式都会走这里。上面那几条
+    # isinstance(io.IOBase) 检查对 int/bool/str 是纯浪费，先给标量开快通道。
+    t = type(v)
+    if t is bool or t is int or t is float or v is None:
+        return repr(v)                     # 这些类型的 repr 不可能含换行
+    if t is str:
+        if len(v) <= limit and "\n" not in v and "\r" not in v:
+            return repr(v)                 # 常见情形：短字符串直接返回
     # 文件 / 套接字这类对象，默认 repr 是 <_io.TextIOWrapper name='data.txt' ...>，
     # 对新手是纯噪音。换成一句人话（保留文件名，这是有用的信息）。
     # 注意：这里在热路径上（每一行每个变量都会调），io 必须模块级导入，
@@ -1862,7 +1919,9 @@ def main() -> int:
         i += 1
     _stub_on = stub_on
 
-    _out = open(event_path, "a", buffering=1, encoding="utf-8")
+    # 块缓冲 + 由 emit 按条数/时间主动刷出（行缓冲会让每事件都打一次 syscall）
+    _out = open(event_path, "a", buffering=1 << 16, encoding="utf-8")
+    atexit.register(flush_events)     # 任何退出路径（含未捕获异常）都不留残余事件
 
     with open(target, "r", encoding="utf-8", errors="replace") as f:
         source = f.read()
@@ -1881,6 +1940,7 @@ def main() -> int:
             "text": (exc.text or "").rstrip(),
         })
         emit({"e": "end", "dur": now_ms(), "ok": False})
+        flush_events()      # 攒批后必须显式刷出，否则最后几十条事件随缓冲一起消失
         _out.close()
         return 1
 
@@ -2052,6 +2112,7 @@ def main() -> int:
             "imports_folded": _import_suppressed,
         },
     })
+    flush_events()          # 同上：收尾事件（end/summary）必须在 close 前落到磁盘
     _out.close()
     if stopped:
         return 130                      # 与 Ctrl-C 的惯例一致：被中断，不是失败

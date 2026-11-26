@@ -2301,7 +2301,7 @@ def _demo_match(code: str):
     return None
 
 
-APP_VERSION = "3.0.13"
+APP_VERSION = "3.0.16"
 
 
 def _ws_available() -> bool:
@@ -2697,7 +2697,7 @@ async def _ws_run_inner(ws: WebSocket, cfg: dict):
         filename += ".py"
     argv = [str(a) for a in (cfg.get("argv") or [])][:16]
     timeout = float(cfg.get("timeout") or 10)
-    timeout = max(1.0, min(timeout, 120.0))
+    timeout = max(1.0, min(timeout, 600.0))
     # 调试模式：人是主角，代码要等人 —— 超时给足，且暂停期间不计时
     debug = bool(cfg.get("debug"))
     if debug:
@@ -3165,7 +3165,9 @@ def main():
     env_port = os.environ.get("PORT") or os.environ.get("PYTRACE_PORT")
     port = int(env_port) if env_port else free_port(args.port)
     url = f"http://{args.host}:{port}"
-    print(BANNER)
+    # flush=True：首屏几行必须立刻可见。stdout 被重定向到日志文件时默认全缓冲，
+    # 用户（和自动化自检）会在服务起来之后仍读到空日志 —— 排查时最要命的体验。
+    print(BANNER, flush=True)
     # 首屏自证：版本号 + 构建时间 + WebSocket 状态。此前黑窗口没有版本标识，
     # 用户反复拿旧 exe 排查新问题、一轮轮对着同样的 404 日志发问 ——
     # "我手里这个 exe 是哪一版、哪次构建"必须是第一眼就能回答的问题。
@@ -3174,17 +3176,17 @@ def main():
     except Exception:                        # 缺文件（只拷了部分源码）也不影响启动
         _BI = {}
     _built = ("  构建 " + _BI["built_at"] + ((" / " + _BI["commit"]) if _BI.get("commit") else "")) if _BI.get("built_at") else ""
-    print(f"  版本: v{APP_VERSION}    WebSocket: {'正常' if WS_OK else '缺失!'}{_built}")
-    print(f"  服务地址: {url}")
+    print(f"  版本: v{APP_VERSION}    WebSocket: {'正常' if WS_OK else '缺失!'}{_built}", flush=True)
+    print(f"  服务地址: {url}", flush=True)
     if DEMO:
-        print("  模式: 在线演示（仅内置示例，禁止任意代码执行）")
-    print(f"  运行目录: {RUNTIME}")
+        print("  模式: 在线演示（仅内置示例，禁止任意代码执行）", flush=True)
+    print(f"  运行目录: {RUNTIME}", flush=True)
     if not WS_OK:
         # 打包缺 WebSocket 库（裸 uvicorn）时第一屏就说清楚，不给"点了没反应"的体验
-        print("  " + "!" * 62)
-        print("  !! 这是一个无法运行的坏包（缺 WebSocket 库），请更换最新版 exe！")
-        print("  !! exe 用户：重新下载最新版 PyTrace.exe；源码用户：pip install \"uvicorn[standard]\"")
-        print("  " + "!" * 62)
+        print("  " + "!" * 62, flush=True)
+        print("  !! 这是一个无法运行的坏包（缺 WebSocket 库），请更换最新版 exe！", flush=True)
+        print("  !! exe 用户：重新下载最新版 PyTrace.exe；源码用户：pip install \"uvicorn[standard]\"", flush=True)
+        print("  " + "!" * 62, flush=True)
     print(f"  按 Ctrl+C 退出\n")
 
     if args.desktop:

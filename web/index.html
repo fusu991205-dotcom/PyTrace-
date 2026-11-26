@@ -73,7 +73,7 @@
         <select id="sampleSel"><option value="">— 内置示例 —</option></select>
       </label>
       <label class="mini">超时
-        <input type="number" id="timeoutInput" value="30" min="1" max="120" step="1"/>s
+        <input type="number" id="timeoutInput" value="30" min="1" max="600" step="1"/>s
       </label>
       <label class="mini" title="选一个能跑你这份代码的 Python（项目内虚拟环境 / IDE 配置的那个）">解释器
         <select id="interpSel"><option value="">自动检测中…</option></select>
@@ -300,6 +300,7 @@
                   <option value="999">全部</option>
                 </select>
               </label>
+              <button class="btn tiny ghost on" id="gvEdges" title="连线显示模式。自动（默认）：只画「活链路」（两端都真实跑过的边）和子进程启动边 —— 大项目进来不会被几百条静态依赖线糊一脸。全部：显示所有 import/调用依赖边（旧版行为）">连线·自动</button>
               <button class="btn tiny ghost" id="gvTrim" title="精简：隐藏没参与任何调用关系的文件（大项目默认开启）。再点一次显示全部文件">精简</button>
               <button class="btn tiny ghost" id="gvFit" title="缩放复位到适应窗口">适应</button>
               <button class="btn tiny ghost" id="gvExport"

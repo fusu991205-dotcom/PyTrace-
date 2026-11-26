@@ -9,12 +9,13 @@
   2. 顶栏按钮 elementFromPoint 命中按钮自身（真的点得到，不是被浮层压住）；
   3. 「收起/展开」可用，收起后只占一行细条。
 """
+import os
 import pathlib
 import sys
 
 from playwright.sync_api import sync_playwright
 
-BASE = "http://127.0.0.1:9001/"
+BASE = os.environ.get("PTRACE_BASE", "http://127.0.0.1:8899/")
 PASS, FAIL = [], []
 
 
@@ -86,8 +87,12 @@ def main():
         page.set_viewport_size({"width": 700, "height": 800})
         page.wait_for_timeout(400)
         over_without = page.evaluate("() => document.documentElement.scrollWidth - window.innerWidth")
+        # 只做「有 vs 无」对照是不够的：两边都溢出 200px 也能过。
+        # 再加一条绝对上限（既有三栏布局在 700px 下溢出 33px，留一点余量到 45px）。
         check("700px 窄窗口：告警条未额外制造溢出",
               over_with <= over_without + 1, {"with": over_with, "without": over_without})
+        check("700px 窄窗口：溢出量本身未恶化（≤45px）",
+              over_with <= 45, {"with": over_with, "without": over_without})
 
         page.set_viewport_size({"width": 900, "height": 800})
         page.wait_for_timeout(400)

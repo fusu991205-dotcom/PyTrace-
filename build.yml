@@ -1,0 +1,102 @@
+name: Build Windows exe
+
+# 每次推代码 / 手动触发，都会在 GitHub 云端 Windows 机器上自动打包，
+# 完成后在本页底部 Artifacts 下载 PyTrace-Windows-exe.zip，解压即得 PyTrace.exe
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:        # 允许在 Actions 页面手动点按钮触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup clean Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # uvicorn[standard] 才带 WebSocket 实现（websockets 库）。裸 uvicorn 打包
+      # 出来的 exe 点「运行」永远 404（/ws/run 握手被拒），且 PyInstaller 对
+      # 缺失的 hidden import 只警告不报错 —— 必须在这里装对，后面还有自检兜底。
+      - name: Install deps
+        run: pip install fastapi "uvicorn[standard]" pyinstaller
+
+      - name: Verify WebSocket libs before build
+        run: |
+          python -c "import websockets; print('websockets', websockets.__version__)"
+          python -c "import uvicorn.protocols.websockets.websockets_impl; print('ws impl ok')"
+
+      # 把「哪次构建」写进 exe：exe 首屏会显示 版本 + 构建时间 + commit。
+      # 用户再发日志截图时，一眼就能确认他跑的是不是新包 —— 不用再靠猜。
+      # 用 python 单行生成（不写 BOM，pwsh 的 Set-Content 会带 BOM 把 .py 弄坏）。
+      - name: Stamp build info
+        shell: pwsh
+        run: |
+          python -c "import datetime,os;info={'version':'${{ github.ref_name }}','built_at':datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')+' UTC','commit':os.environ.get('GITHUB_SHA','')[:7]};open('build_info.py','w',encoding='utf-8').write('BUILD_INFO = '+repr(info)+chr(10))"
+          Get-Content build_info.py
+
+      - name: Build exe
+        run: python -m PyInstaller --clean --noconfirm pytrace.spec
+
+      # 打包自检：启动 exe，验证 /api/info 可访问、ws_ok=True，并用真实
+      # WebSocket 握手验证 /ws/ping 通道。任何一步失败就让整个构建失败，
+      # 不再产出"点运行永远没反应"的坏 exe。
+      - name: Smoke test exe (HTTP + WebSocket)
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "dist\PyTrace.exe" -ArgumentList "--port","8901","--no-browser" -PassThru
+          $ok = $false
+          $info = ""
+          for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Seconds 2
+            try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:8901/api/info" -UseBasicParsing -TimeoutSec 5
+              if ($r.StatusCode -eq 200) { $info = $r.Content; $ok = $true; break }
+            } catch { }
+          }
+          if (-not $ok) {
+            Write-Host "::error::exe 启动或 /api/info 失败"
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Write-Host "api/info OK: $info"
+          $env:WSCHK = (python -c "
+          import json, sys, urllib.request
+          info = json.loads(urllib.request.urlopen('http://127.0.0.1:8901/api/info').read())
+          if not info.get('ws_ok', False):
+              print('FAIL-NO-WS')
+          else:
+              print('WS-OK')
+          ")
+          Write-Host "ws_ok check: $env:WSCHK"
+          if ($env:WSCHK -ne 'WS-OK') {
+            Write-Host "::error::exe 里没有可用的 WebSocket 实现（ws_ok=False）"
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+          }
+          python -c "
+          import asyncio, websockets
+          async def t():
+              async with websockets.connect('ws://127.0.0.1:8901/ws/ping') as w:
+                  await w.send('{}')
+                  return await asyncio.wait_for(w.recv(), 10)
+          try:
+              print('ws handshake OK:', asyncio.run(t())[:80])
+          except Exception as e:
+              print('::error::WebSocket 握手失败:', e)
+              raise SystemExit(1)
+          "
+          if ($LASTEXITCODE -ne 0) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; exit 1 }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "smoke test 全部通过"
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: PyTrace-Windows-exe
+          path: dist/PyTrace.exe
+          retention-days: 90
