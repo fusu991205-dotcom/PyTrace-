@@ -91,13 +91,27 @@ def main():
         page.wait_for_timeout(800)
 
         # 2) 填路径载入大项目（rootInput 用 onchange 触发，fill 后需 blur）
+        #    载入是异步的（list_files + project_map）：必须等条件成立而不是固定 sleep——
+        #    固定 2.5s 在宿主机负载高时会假挂，负载低时又绿，这正是本测试历史上
+        #    "复跑就绿"的来源。wait_for_function 轮询上限 30s，超时才算失败。
         page.fill("#rootInput", root)
         page.evaluate("() => document.querySelector('#rootInput').blur()")
-        page.wait_for_timeout(2500)     # list_files + project_map 后台
-        info = page.evaluate("() => ({n: S.projectFiles ? S.projectFiles.length : 0})")
-        check("前端载入 720 文件", info["n"] == n_files, str(info["n"]))
+        try:
+            page.wait_for_function(
+                "() => S.projectFiles && S.projectFiles.length === %d" % n_files,
+                timeout=30000)
+            loaded = n_files
+        except Exception:
+            loaded = page.evaluate("() => S.projectFiles ? S.projectFiles.length : 0")
+        check("前端载入 720 文件", loaded == n_files, str(loaded))
 
-        # 3) 文件树默认折叠（>600 文件）：顶层 8 pkg + core 目录 + 60 顶层散文件 ≈ 69 行
+        # 3) 文件树默认折叠（>600 文件）：先等树真正渲染出来（.ft-row > 0），
+        #    "载入完成"和"树渲染完成"是两个时刻 —— 之前直接数 DOM 会拿到 0 行假挂
+        try:
+            page.wait_for_function(
+                "() => document.querySelectorAll('#ftBody .ft-row').length > 0", timeout=30000)
+        except Exception:
+            pass
         rows = page.evaluate("() => document.querySelectorAll('#ftBody .ft-row').length")
         check("大项目文件树默认折叠（行数 < 100）", 0 < rows < 100, f"{rows} 行")
         # 连开两层目录
@@ -117,8 +131,14 @@ def main():
         opened = page.evaluate("() => S.filename")
         check("打开深层文件 pkg0/sub0/mod3.py", opened == "pkg0/sub0/mod3.py", str(opened))
 
-        # 5) project_map 已在后台完成：入口下拉 / 分级可用
-        pm = page.evaluate("() => S.projectMap ? (S.projectMap.files || []).length : 0")
+        # 5) project_map 已在后台完成：入口下拉 / 分级可用（同样等条件，不赌时长）
+        try:
+            page.wait_for_function(
+                "() => S.projectMap && (S.projectMap.files || []).length === %d" % n_files,
+                timeout=60000)
+            pm = n_files
+        except Exception:
+            pm = page.evaluate("() => S.projectMap ? (S.projectMap.files || []).length : 0")
         check("project_map 后台完成（720 文件分级）", pm == n_files, str(pm))
 
         # 6) 阅读模式：入口文件有讲解卡（S.readCard 由 renderReadCard 生成）

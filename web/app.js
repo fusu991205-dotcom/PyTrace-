@@ -5491,6 +5491,14 @@ function selectGraphNode(name) {
     ? `<div class="dr"><b>原因</b><i>${esc(c.errHint)}</i></div>`
       + (c.errText ? `<pre class="gv-err">${esc(String(c.errText).slice(-500))}</pre>` : '')
     : '';
+  // 引用列表几十个文件挤成一团没法读：chip 化 + 超 8 个默认折叠成「前 8 个 + 展开全部」
+  const chipList = (arr) => {
+    if (!arr.length) return '—';
+    const chips = arr.map((x) => `<code>${esc(x)}</code>`).join('');
+    if (arr.length <= 8) return chips;
+    return `<span class="chips fold">${chips}</span>`
+      + `<button class="btn tiny ghost chips-toggle">展开全部 ${arr.length} 个</button>`;
+  };
 
   detail.innerHTML = `
     <button class="gv-close" data-close="1">×</button>
@@ -5498,8 +5506,8 @@ function selectGraphNode(name) {
     <div class="dk">${esc(name)}</div>
     <div class="dr"><b>定位</b><i>${esc(meta.label)}${f.reason ? ' · ' + esc(f.reason) : ''}</i></div>
     <div class="dr"><b>规模</b><i>${f.lines || 0} 行${(f.defs || []).length ? ` · ${f.defs.length} 个函数/类` : ''}</i></div>
-    <div class="dr"><b>依赖</b><i>${deps.length ? deps.map((d) => `<code>${esc(d.split('/').pop())}</code>`).join(' ') : '—（不依赖项目内其它文件）'}</i></div>
-    <div class="dr"><b>被谁用</b><i>${users.length ? users.map((u) => `<code>${esc(u.split('/').pop())}</code>`).join(' ') : '—'}</i></div>
+    <div class="dr"><b>依赖</b><i>${deps.length ? chipList(deps.map((d) => d.split('/').pop())) : '—（不依赖项目内其它文件）'}</i></div>
+    <div class="dr"><b>被谁用</b><i>${chipList(users.map((u) => u.split('/').pop()))}</i></div>
     <div class="dr"><b>运行</b><i>${esc(covTxt)}</i></div>
     ${failHtml}
     <div class="da">
@@ -5513,6 +5521,13 @@ function selectGraphNode(name) {
   if (ob) ob.onclick = () => openFromGraph(ob.dataset.open);
   const rb = detail.querySelector('[data-run]');
   if (rb) rb.onclick = () => runSingleFromGraph(rb.dataset.run);
+  const ct = detail.querySelector('.chips-toggle');
+  if (ct) ct.onclick = () => {
+    const box = detail.querySelector('.chips.fold');
+    if (!box) return;
+    const folding = box.classList.toggle('fold');
+    ct.textContent = folding ? `展开全部 ${box.children.length} 个` : '收起';
+  };
 }
 
 function openFromGraph(name) {

@@ -2003,6 +2003,19 @@ def main() -> int:
         "__spec__": None,
     }
 
+    # 把用户的执行命名空间注册成真正的 sys.modules['__main__']（与 python script.py / runpy 对齐）。
+    # 不注册的话，__main__ 一直指向 runner.py 自己 —— 所有回查 __main__ 的库全部失灵：
+    # pickle.loads 报 "attribute lookup Dog on __main__ failed"、pydantic 延迟解析注解
+    # 报 "you should define 'X' then call model_rebuild()"、multiprocessing 重建参数同样会找错对象。
+    # 这些失败在直接 python 跑时不存在，用户会误以为"这项目在 PyTrace 里就跑不了"。
+    try:
+        _main_mod = types.ModuleType("__main__")
+        _main_mod.__dict__.update(g)
+        g = _main_mod.__dict__                  # 后续 exec 与包上下文都写进模块字典
+        sys.modules["__main__"] = _main_mod
+    except Exception:
+        pass                                    # 极端环境注册失败：退回原行为，只是库兼容性差
+
     # 包上下文：入口文件是包内模块（有相对导入）时，与 python -m 行为对齐。
     # 不补的话 `from .config import ...` 直接 ImportError，新手会以为代码坏了。
     if pkg_root:

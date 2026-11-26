@@ -1415,6 +1415,11 @@ body.drag-row .stage,body.drag-row iframe{pointer-events:none}
   font-family:var(--mono);font-size:10.5px;padding:1px 5px;border-radius:4px;
   background:rgba(255,255,255,.05);border:1px solid var(--line);
 }
+
+/* 引用列表 chip 化：几十个文件名必须有间距、能折叠，不然就是一堵字墙 */
+.gv-detail .chips code{display:inline-block;margin:2px 3px 2px 0}
+.gv-detail .chips.fold code:nth-child(n+9){display:none}
+.gv-detail .chips-toggle{margin-top:4px}
 .gv-detail .da{display:flex;gap:6px;margin-top:10px}
 .gv-close{
   position:absolute;right:8px;top:6px;border:0;background:transparent;color:var(--dim);
